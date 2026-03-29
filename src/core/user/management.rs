@@ -13,9 +13,12 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::cli::color::{BOLD, GREEN, RED, RESET, YELLOW};
-use crate::core::root_check::{ensure_admin, check_if_admin};
+use crate::core::root_check::ensure_admin;
+// FIX: hapus `check_if_admin` dari root_check (tidak dipakai di sini, ada warning).
+// FIX: ganti `clean_orphaned_sudoers_files_from_passwd` → `remove_orphaned_sudoers_files`
+//      (nama fungsi yang sebenarnya ada di sudoers.rs)
 use crate::core::user::sudoers::{
-    configure_sudoers, clean_orphaned_sudoers_files_from_passwd,
+    configure_sudoers, remove_orphaned_sudoers_files,
     check_if_admin as sudoers_check_if_admin,
 };
 use crate::core::user::types::UserRole;
@@ -402,7 +405,8 @@ pub async fn clean_orphaned_sudoers() {
             .filter_map(|line| line.split(':').next().map(|u| u.to_string()))
             .collect();
 
-        clean_orphaned_sudoers_files_from_passwd(&existing_usernames).await;
+        // FIX: fungsi yang benar adalah remove_orphaned_sudoers_files (bukan ...from_passwd)
+        remove_orphaned_sudoers_files(&existing_usernames).await;
     }
 
     println!(

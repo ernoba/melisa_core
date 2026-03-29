@@ -6,6 +6,10 @@
 // `execute_command` is the single entry-point called by the REPL loop.
 // It parses raw input, strips the optional `--audit` flag, then delegates
 // to the appropriate domain function.
+//
+// FIX: Operator `?` tidak bisa dipakai langsung di fungsi yang return ExecResult
+// (bukan Result<_, _>). Solusi: macro `req!` yang perilakunya identik dengan `?`
+// tapi kompatibel dengan semua return type.
 // ============================================================================
 
 use tokio::io::{self, AsyncBufReadExt};
@@ -32,6 +36,24 @@ use crate::core::project::{
 };
 use crate::distros::lxc_distro::get_lxc_distro_list;
 use crate::deployment::deployer::{cmd_up, cmd_down, cmd_mel_info};
+
+// ── FIX: Macro pengganti operator `?` untuk return type ExecResult ────────────
+//
+// `require_arg` mengembalikan `Result<&str, ExecResult>`.
+// Fungsi `dispatch_melisa_subcommand` mengembalikan `ExecResult` (bukan Result),
+// sehingga `?` tidak bisa dikompilasi — Rust tidak tahu cara mengonversi error ke ExecResult.
+//
+// `req!(expr)` melakukan hal yang persis sama dengan `?`:
+//   - Jika Ok(v)  → pakai v
+//   - Jika Err(r) → return r langsung ke pemanggil
+macro_rules! req {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(r) => return r,
+        }
+    };
+}
 
 // ── Result type for REPL loop control ───────────────────────────────────────
 
@@ -127,19 +149,19 @@ async fn dispatch_melisa_subcommand(
 
         // ── Deployment engine ────────────────────────────────────────────────
         "--up" => {
-            let mel_path = require_arg(tokens, 2, "melisa --up <file.mel>")?;
+            let mel_path = req!(require_arg(tokens, 2, "melisa --up <file.mel>"));
             cmd_up(mel_path, is_audit_mode).await;
             ExecResult::Continue
         }
 
         "--down" => {
-            let mel_path = require_arg(tokens, 2, "melisa --down <file.mel>")?;
+            let mel_path = req!(require_arg(tokens, 2, "melisa --down <file.mel>"));
             cmd_down(mel_path, is_audit_mode).await;
             ExecResult::Continue
         }
 
         "--mel-info" => {
-            let mel_path = require_arg(tokens, 2, "melisa --mel-info <file.mel>")?;
+            let mel_path = req!(require_arg(tokens, 2, "melisa --mel-info <file.mel>"));
             cmd_mel_info(mel_path).await;
             ExecResult::Continue
         }
@@ -173,14 +195,14 @@ async fn dispatch_melisa_subcommand(
 
         // ── Container lifecycle ──────────────────────────────────────────────
         "--create" => {
-            let name = require_arg(tokens, 2, "melisa --create <name> <distro_code>")?;
-            let distro_code = require_arg(tokens, 3, "melisa --create <name> <distro_code>")?;
+            let name = req!(require_arg(tokens, 2, "melisa --create <n> <distro_code>"));
+            let distro_code = req!(require_arg(tokens, 3, "melisa --create <n> <distro_code>"));
             handle_create_container(name, distro_code, is_audit_mode).await;
             ExecResult::Continue
         }
 
         "--delete" => {
-            let name = require_arg(tokens, 2, "melisa --delete <name>")?;
+            let name = req!(require_arg(tokens, 2, "melisa --delete <n>"));
             if confirm_destructive_action(&format!("permanently delete container '{}'", name)).await {
                 execute_with_spinner(
                     &format!("Destroying container '{}'...", name),
@@ -193,29 +215,29 @@ async fn dispatch_melisa_subcommand(
         }
 
         "--run" => {
-            let name = require_arg(tokens, 2, "melisa --run <name>")?;
+            let name = req!(require_arg(tokens, 2, "melisa --run <n>"));
             start_container(name, is_audit_mode).await;
             ExecResult::Continue
         }
 
         "--stop" => {
-            let name = require_arg(tokens, 2, "melisa --stop <name>")?;
+            let name = req!(require_arg(tokens, 2, "melisa --stop <n>"));
             stop_container(name, is_audit_mode).await;
             ExecResult::Continue
         }
 
         "--use" => {
-            let name = require_arg(tokens, 2, "melisa --use <name>")?;
+            let name = req!(require_arg(tokens, 2, "melisa --use <n>"));
             attach_to_container(name).await;
             ExecResult::Continue
         }
 
         "--send" => {
-            let name = require_arg(tokens, 2, "melisa --send <name> <command>")?;
+            let name = req!(require_arg(tokens, 2, "melisa --send <n> <command>"));
             let cmd_args: Vec<&str> = tokens[3..].iter().map(|s| s.as_str()).collect();
             if cmd_args.is_empty() {
                 println!(
-                    "{}[ERROR]{} Command payload required. Usage: melisa --send <name> <command>",
+                    "{}[ERROR]{} Command payload required. Usage: melisa --send <n> <command>",
                     RED, RESET
                 );
                 return ExecResult::Continue;
@@ -225,13 +247,13 @@ async fn dispatch_melisa_subcommand(
         }
 
         "--info" => {
-            let name = require_arg(tokens, 2, "melisa --info <name>")?;
+            let name = req!(require_arg(tokens, 2, "melisa --info <n>"));
             handle_container_info(name).await;
             ExecResult::Continue
         }
 
         "--ip" => {
-            let name = require_arg(tokens, 2, "melisa --ip <name>")?;
+            let name = req!(require_arg(tokens, 2, "melisa --ip <n>"));
             match get_container_ip(name).await {
                 Some(ip) => println!("{}", ip),
                 None => eprintln!(
@@ -243,8 +265,8 @@ async fn dispatch_melisa_subcommand(
         }
 
         "--upload" => {
-            let name = require_arg(tokens, 2, "melisa --upload <name> <dest_path>")?;
-            let dest_path = require_arg(tokens, 3, "melisa --upload <name> <dest_path>")?;
+            let name = req!(require_arg(tokens, 2, "melisa --upload <n> <dest_path>"));
+            let dest_path = req!(require_arg(tokens, 3, "melisa --upload <n> <dest_path>"));
             upload_to_container(name, dest_path).await;
             ExecResult::Continue
         }
@@ -265,7 +287,7 @@ async fn dispatch_melisa_subcommand(
                     add_shared_folder(name, host_path, container_path).await;
                 }
                 _ => println!(
-                    "{}[ERROR]{} Usage: melisa --share <name> <host_path> <container_path>",
+                    "{}[ERROR]{} Usage: melisa --share <n> <host_path> <container_path>",
                     RED, RESET
                 ),
             }
@@ -278,7 +300,7 @@ async fn dispatch_melisa_subcommand(
                     remove_shared_folder(name, host_path, container_path).await;
                 }
                 _ => println!(
-                    "{}[ERROR]{} Usage: melisa --reshare <name> <host_path> <container_path>",
+                    "{}[ERROR]{} Usage: melisa --reshare <n> <host_path> <container_path>",
                     RED, RESET
                 ),
             }
@@ -287,13 +309,13 @@ async fn dispatch_melisa_subcommand(
 
         // ── User management ──────────────────────────────────────────────────
         "--add" => {
-            let username = require_arg(tokens, 2, "melisa --add <username>")?;
+            let username = req!(require_arg(tokens, 2, "melisa --add <username>"));
             add_melisa_user(username, is_audit_mode).await;
             ExecResult::Continue
         }
 
         "--remove" => {
-            let username = require_arg(tokens, 2, "melisa --remove <username>")?;
+            let username = req!(require_arg(tokens, 2, "melisa --remove <username>"));
             if confirm_destructive_action(&format!("permanently delete user '{}'", username)).await {
                 delete_melisa_user(username, is_audit_mode).await;
             }
@@ -306,13 +328,13 @@ async fn dispatch_melisa_subcommand(
         }
 
         "--upgrade" => {
-            let username = require_arg(tokens, 2, "melisa --upgrade <username>")?;
+            let username = req!(require_arg(tokens, 2, "melisa --upgrade <username>"));
             upgrade_user(username, is_audit_mode).await;
             ExecResult::Continue
         }
 
         "--passwd" => {
-            let username = require_arg(tokens, 2, "melisa --passwd <username>")?;
+            let username = req!(require_arg(tokens, 2, "melisa --passwd <username>"));
             set_user_password(username).await;
             ExecResult::Continue
         }
@@ -331,7 +353,7 @@ async fn dispatch_melisa_subcommand(
                 );
                 return ExecResult::Continue;
             }
-            let project_name = require_arg(tokens, 2, "melisa --new_project <project_name>")?;
+            let project_name = req!(require_arg(tokens, 2, "melisa --new_project <project_name>"));
             create_new_project(project_name, is_audit_mode).await;
             ExecResult::Continue
         }
@@ -344,7 +366,7 @@ async fn dispatch_melisa_subcommand(
                 );
                 return ExecResult::Continue;
             }
-            let project_name = require_arg(tokens, 2, "melisa --delete_project <project_name>")?;
+            let project_name = req!(require_arg(tokens, 2, "melisa --delete_project <project_name>"));
             let master_path = format!("{}/{}", PROJECTS_MASTER_PATH, project_name);
             if !std::path::Path::new(&master_path).exists() {
                 println!(
@@ -434,7 +456,7 @@ async fn dispatch_melisa_subcommand(
         }
 
         "--update" => {
-            let project_name = require_arg(tokens, 2, "melisa --update <project_name>")?;
+            let project_name = req!(require_arg(tokens, 2, "melisa --update <project_name>"));
             update_project_for_user(project_name, user, is_audit_mode).await;
             ExecResult::Continue
         }
@@ -447,7 +469,7 @@ async fn dispatch_melisa_subcommand(
                 );
                 return ExecResult::Continue;
             }
-            let project_name = require_arg(tokens, 2, "melisa --update-all <project_name>")?;
+            let project_name = req!(require_arg(tokens, 2, "melisa --update-all <project_name>"));
             distribute_master_to_all_members(project_name, is_audit_mode).await;
             ExecResult::Continue
         }
@@ -620,7 +642,7 @@ async fn handle_container_info(name: &str) {
     }
 }
 
-/// Prints the full help menu.  Admin-only sections are gated on privilege check.
+/// Prints the full help menu. Admin-only sections are gated on privilege check.
 async fn print_help(is_audit_mode: bool) {
     let is_admin = admin_check().await;
 
@@ -746,7 +768,7 @@ mod tests {
     #[test]
     fn test_require_arg_returns_value_when_present() {
         let tokens: Vec<String> = vec!["melisa".into(), "--run".into(), "mybox".into()];
-        let result = require_arg(&tokens, 2, "melisa --run <name>");
+        let result = require_arg(&tokens, 2, "melisa --run <n>");
         assert!(result.is_ok(), "require_arg must succeed when the token exists at the given index");
         assert_eq!(result.unwrap(), "mybox");
     }
@@ -754,7 +776,7 @@ mod tests {
     #[test]
     fn test_require_arg_returns_err_when_index_out_of_bounds() {
         let tokens: Vec<String> = vec!["melisa".into(), "--run".into()];
-        let result = require_arg(&tokens, 2, "melisa --run <name>");
+        let result = require_arg(&tokens, 2, "melisa --run <n>");
         assert!(
             result.is_err(),
             "require_arg must return Err when the required argument is missing"
