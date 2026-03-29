@@ -1,0 +1,573 @@
+// ============================================================================
+// src/core/setup.rs
+//
+// MELISA host environment initialization (`melisa --setup`).
+//
+// Provisions the host machine so it can run MELISA and manage LXC containers.
+// This must be run directly on the physical console — NOT over SSH — because
+// it configures network interfaces and firewall rules that could lock out a
+// remote administrator.
+//
+// Steps:
+//  1.  SSH session detection (refuse if running over SSH)
+//  2.  LXC package installation
+//  3.  SSH server installation
+//  4.  Binary self-copy to /usr/local/bin
+//  5.  Firewall configuration (SSH + lxcbr0)
+//  6.  LXC network quota (lxc-usernet)
+//  7.  Jail shell registration (/etc/shells)
+//  8.  Sudoers access for the MELISA binary
+//  9.  UID-map SUID bits (newuidmap / newgidmap)
+//  10. Master projects directory
+//  11. Global Git safety override
+//  12. /home privacy hardening
+//  13. LXC sub-ID mapping for the calling user
+// ============================================================================
+
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::fs::{self, OpenOptions};
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
+use tokio::time::timeout;
+
+use crate::cli::color::{BOLD, CYAN, GREEN, RED, RESET};
+use crate::core::project::management::PROJECTS_MASTER_PATH;
+use crate::distros::host_distro::{detect_host_distro, get_distro_config, FirewallKind};
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+/// Runs the full host environment initialization sequence.
+///
+/// Detects the host Linux distribution and installs all required packages,
+/// configures networking, registers the jail shell, and hardens system privacy.
+pub async fn install_host_environment() {
+    // Safety guard: refuse to run over SSH to avoid locking out the operator.
+    if env::var("SSH_CONNECTION").is_ok() || env::var("SSH_CLIENT").is_ok() {
+        eprintln!(
+            "{}[BLOCKED]{} Setup must be run directly on the physical console, \
+            not over an SSH session.",
+            RED, RESET
+        );
+        eprintln!(
+            "{}[INFO]{} This restriction prevents accidental firewall misconfiguration \
+            that could sever your remote connection.",
+            BOLD, RESET
+        );
+        return;
+    }
+
+    let host_distro = detect_host_distro().await;
+    let distro_config = get_distro_config(&host_distro);
+
+    println!("\n{}════ MELISA HOST SETUP ════{}", BOLD, RESET);
+    println!(
+        "{}[INFO]{} Detected host distribution: {}{}{}",
+        BOLD, RESET, CYAN, distro_config.name, RESET
+    );
+
+    install_lxc_packages(&distro_config.pkg_manager, &distro_config.lxc_packages).await;
+    install_ssh_server(&distro_config.pkg_manager).await;
+    copy_binary_to_system().await;
+    setup_ssh_firewall(&distro_config.firewall_tool).await;
+    setup_lxc_network_quota().await;
+    register_melisa_shell().await;
+    configure_system_sudoers_access().await;
+    fix_uidmap_permissions().await;
+    setup_projects_directory().await;
+    configure_git_security().await;
+    fix_system_privacy().await;
+
+    if let Ok(username) = env::var("SUDO_USER") {
+        if !username.is_empty() {
+            setup_lxc_user_subid_mapping(&username).await;
+        }
+    }
+
+    println!("\n{}════ SETUP COMPLETE ════{}", GREEN, RESET);
+    println!("{}[DONE]{} MELISA is ready. Run 'melisa' to start.", GREEN, RESET);
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Executes a command silently and returns `true` if it succeeded.
+async fn execute_silent_task(
+    program: &str,
+    args: &[&str],
+    description: &str,
+    timeout_secs: u64,
+) -> bool {
+    let future = Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    match timeout(Duration::from_secs(timeout_secs), future).await {
+        Ok(Ok(status)) if status.success() => {
+            println!("  {:<50} [ {}OK{} ]", description, GREEN, RESET);
+            true
+        }
+        Ok(Ok(status)) => {
+            println!(
+                "  {:<50} [ {}FAILED (Code: {}){} ]",
+                description, RED,
+                status.code().unwrap_or(-1), RESET
+            );
+            false
+        }
+        Ok(Err(err)) => {
+            println!(
+                "  {:<50} [ {}IO ERROR: {}{} ]",
+                description, RED, err, RESET
+            );
+            false
+        }
+        Err(_) => {
+            println!(
+                "  {:<50} [ {}TIMEOUT{} ]",
+                description, RED, RESET
+            );
+            false
+        }
+    }
+}
+
+/// Creates a backup copy of a file before modifying it.
+async fn backup_file(path: &str) {
+    let backup_path = format!("{}.melisa.bak", path);
+    if Path::new(path).exists() && !Path::new(&backup_path).exists() {
+        let _ = fs::copy(path, &backup_path).await;
+    }
+}
+
+/// Installs LXC and related packages using the detected package manager.
+async fn install_lxc_packages(pkg_manager: &str, lxc_packages: &[String]) {
+    println!("\n{}Installing LXC Packages…{}", BOLD, RESET);
+    let pkg_list: Vec<&str> = lxc_packages.iter().map(|s| s.as_str()).collect();
+
+    let install_args: Vec<&str> = match pkg_manager {
+        "apt-get" | "apt" => {
+            let mut args = vec!["install", "-y"];
+            args.extend(pkg_list.iter().copied());
+            args
+        }
+        "dnf" | "yum" => {
+            let mut args = vec!["install", "-y"];
+            args.extend(pkg_list.iter().copied());
+            args
+        }
+        "pacman" => {
+            let mut args = vec!["-S", "--noconfirm"];
+            args.extend(pkg_list.iter().copied());
+            args
+        }
+        _ => {
+            println!(
+                "  {:<50} [ {}UNSUPPORTED PM{} ]",
+                "Package installation", RED, RESET
+            );
+            return;
+        }
+    };
+
+    execute_silent_task(
+        pkg_manager,
+        &install_args,
+        "Installing LXC packages",
+        300,
+    )
+    .await;
+}
+
+/// Installs the SSH server daemon.
+async fn install_ssh_server(pkg_manager: &str) {
+    println!("\n{}Installing SSH Server…{}", BOLD, RESET);
+    let (pkg_name, update_cmd, install_args): (&str, &[&str], &[&str]) = match pkg_manager {
+        "apt-get" | "apt" => (
+            "openssh-server",
+            &["update"],
+            &["install", "-y", "openssh-server"],
+        ),
+        "dnf" | "yum" => ("openssh-server", &[], &["install", "-y", "openssh-server"]),
+        "pacman" => ("openssh", &["-Sy", "--noconfirm"], &["-S", "--noconfirm", "openssh"]),
+        _ => {
+            println!(
+                "  {:<50} [ {}UNSUPPORTED PM{} ]",
+                "SSH server installation", RED, RESET
+            );
+            return;
+        }
+    };
+
+    if !update_cmd.is_empty() {
+        execute_silent_task(pkg_manager, update_cmd, "Updating package index", 120).await;
+    }
+
+    execute_silent_task(
+        pkg_manager,
+        install_args,
+        &format!("Installing {}", pkg_name),
+        180,
+    )
+    .await;
+}
+
+/// Copies the running MELISA binary to `/usr/local/bin/melisa`.
+async fn copy_binary_to_system() {
+    println!("\n{}Deploying MELISA Binary to System Path…{}", BOLD, RESET);
+
+    let current_binary = match env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            println!(
+                "  {:<50} [ {}RESOLVE ERROR: {}{} ]",
+                "Locating binary", RED, err, RESET
+            );
+            return;
+        }
+    };
+
+    let target_path = PathBuf::from("/usr/local/bin/melisa");
+
+    // Skip if the binary is already in the system path.
+    if current_binary == target_path {
+        println!(
+            "  {:<50} [ {}ALREADY IN PLACE{} ]",
+            "Binary deployment", CYAN, RESET
+        );
+        return;
+    }
+
+    let copy_future = Command::new("sudo")
+        .args(&[
+            "cp",
+            current_binary.to_str().unwrap_or(""),
+            "/usr/local/bin/melisa",
+        ])
+        .status();
+
+    match timeout(Duration::from_secs(30), copy_future).await {
+        Ok(Ok(s)) if s.success() => {
+            // Make the binary SUID so non-root MELISA users can escalate.
+            execute_silent_task(
+                "chmod",
+                &["u+s", "/usr/local/bin/melisa"],
+                "Applying SUID bit to MELISA binary",
+                10,
+            )
+            .await;
+        }
+        Ok(Ok(s)) => println!(
+            "  {:<50} [ {}FAILED (Code: {}){} ]",
+            "Copying binary",
+            RED,
+            s.code().unwrap_or(-1),
+            RESET
+        ),
+        Ok(Err(err)) => println!(
+            "  {:<50} [ {}IO ERROR: {}{} ]",
+            "Copying binary", RED, err, RESET
+        ),
+        Err(_) => println!(
+            "  {:<50} [ {}TIMEOUT{} ]",
+            "Binary copy timed out", RED, RESET
+        ),
+    }
+}
+
+/// Configures the host firewall to allow SSH and LXC bridge traffic.
+async fn setup_ssh_firewall(firewall: &FirewallKind) {
+    println!("\n{}Configuring Host Firewall…{}", BOLD, RESET);
+    match firewall {
+        FirewallKind::Firewalld => {
+            let ssh_ok = execute_silent_task(
+                "firewall-cmd",
+                &["--add-service=ssh", "--permanent"],
+                "Adding SSH service rule",
+                10,
+            )
+            .await;
+            let bridge_ok = execute_silent_task(
+                "firewall-cmd",
+                &["--zone=trusted", "--add-interface=lxcbr0", "--permanent"],
+                "Assigning lxcbr0 to trusted zone",
+                10,
+            )
+            .await;
+            let reload_ok = execute_silent_task(
+                "firewall-cmd",
+                &["--reload"],
+                "Reloading firewall rules",
+                15,
+            )
+            .await;
+            if ssh_ok && bridge_ok && reload_ok {
+                println!(
+                    "  {:<50} [ {}OK{} ]",
+                    "Firewall: SSH and LXC bridge authorized", GREEN, RESET
+                );
+            }
+        }
+        FirewallKind::Ufw => {
+            execute_silent_task("ufw", &["allow", "ssh"], "Allowing SSH via UFW", 10).await;
+            execute_silent_task("ufw", &["allow", "in", "on", "lxcbr0"], "Trusting lxcbr0 in UFW", 10).await;
+            execute_silent_task("ufw", &["--force", "enable"], "Enabling UFW", 10).await;
+            execute_silent_task("ufw", &["reload"], "Reloading UFW", 10).await;
+        }
+        FirewallKind::Iptables => {
+            execute_silent_task(
+                "iptables",
+                &["-A", "INPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"],
+                "Allowing SSH via iptables",
+                10,
+            )
+            .await;
+            execute_silent_task(
+                "iptables",
+                &["-A", "INPUT", "-i", "lxcbr0", "-j", "ACCEPT"],
+                "Trusting lxcbr0 via iptables",
+                10,
+            )
+            .await;
+        }
+    }
+}
+
+/// Adds the calling user to `/etc/lxc/lxc-usernet` for network quota.
+async fn setup_lxc_network_quota() {
+    let config_path = "/etc/lxc/lxc-usernet";
+    println!("\n{}Configuring LXC Network Quota…{}", BOLD, RESET);
+
+    let username = match env::var("SUDO_USER") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return,
+    };
+
+    let quota_rule = format!("{} veth lxcbr0 10\n", username);
+    backup_file(config_path).await;
+
+    let existing_content = fs::read_to_string(config_path).await.unwrap_or_default();
+    if existing_content.contains(&quota_rule) {
+        println!(
+            "  {:<50} [ {}SKIPPED{} ]",
+            "Network quota already configured", CYAN, RESET
+        );
+        return;
+    }
+
+    match OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(config_path)
+        .await
+    {
+        Ok(mut file) => {
+            if let Err(err) = file.write_all(quota_rule.as_bytes()).await {
+                println!(
+                    "  {:<50} [ {}IO ERROR{} ] {}",
+                    "Network Quota", RED, RESET, err
+                );
+            } else {
+                println!(
+                    "  {:<50} [ {}OK{} ]",
+                    format!("Network quota for '{}' assigned", username), GREEN, RESET
+                );
+            }
+        }
+        Err(err) => println!(
+            "  {:<50} [ {}ACCESS DENIED{} ] {}",
+            "Network Quota", RED, RESET, err
+        ),
+    }
+}
+
+/// Registers the MELISA binary as a valid login shell in `/etc/shells`.
+async fn register_melisa_shell() {
+    let shell_path = "/usr/local/bin/melisa";
+    println!("\n{}Registering MELISA Jail Shell…{}", BOLD, RESET);
+    backup_file("/etc/shells").await;
+
+    let register_cmd = format!(
+        "grep -qxF '{0}' /etc/shells || echo '{0}' >> /etc/shells",
+        shell_path
+    );
+
+    execute_silent_task("sh", &["-c", &register_cmd], "Registering shell in /etc/shells", 10).await;
+}
+
+/// Writes a sudoers rule allowing any user to run `sudo melisa`.
+async fn configure_system_sudoers_access() {
+    let sudo_rule = "ALL ALL=(ALL) NOPASSWD: /usr/local/bin/melisa\n";
+    let sudoers_file = "/etc/sudoers.d/melisa";
+    println!("\n{}Configuring System Sudoers Access…{}", BOLD, RESET);
+
+    match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(sudoers_file)
+        .await
+    {
+        Ok(mut file) => {
+            if let Err(err) = file.write_all(sudo_rule.as_bytes()).await {
+                println!(
+                    "  {:<50} [ {}IO ERROR{} ] {}",
+                    "Sudoers Policy", RED, RESET, err
+                );
+            } else {
+                execute_silent_task(
+                    "chmod",
+                    &["0440", sudoers_file],
+                    "Applying strict permissions (0440)",
+                    5,
+                )
+                .await;
+                println!("  {:<50} [ {}OK{} ]", "Sudoers rules deployed", GREEN, RESET);
+            }
+        }
+        Err(err) => println!(
+            "  {:<50} [ {}ACCESS DENIED{} ] {}",
+            "Sudoers Policy", RED, RESET, err
+        ),
+    }
+}
+
+/// Sets the SUID bit on `newuidmap` and `newgidmap` for unprivileged LXC containers.
+async fn fix_uidmap_permissions() {
+    println!("\n{}Fixing UID/GID Map Permissions…{}", BOLD, RESET);
+    for path in &["/usr/bin/newuidmap", "/usr/bin/newgidmap"] {
+        if Path::new(path).exists() {
+            execute_silent_task(
+                "chmod",
+                &["u+s", path],
+                &format!("Setting SUID on {}", path),
+                5,
+            )
+            .await;
+        } else {
+            println!("  {:<50} [ {}MISSING{} ]", path, RED, RESET);
+        }
+    }
+    execute_silent_task(
+        "chmod",
+        &["+x", "/var/lib/lxc"],
+        "Enabling traversal on /var/lib/lxc",
+        5,
+    )
+    .await;
+}
+
+/// Creates and secures the master projects directory.
+async fn setup_projects_directory() {
+    println!("\n{}Configuring Master Projects Infrastructure…{}", BOLD, RESET);
+
+    match timeout(
+        Duration::from_secs(10),
+        Command::new("mkdir").args(&["-p", PROJECTS_MASTER_PATH]).status(),
+    )
+    .await
+    {
+        Ok(Ok(s)) if s.success() => {
+            execute_silent_task(
+                "chmod",
+                &["1777", PROJECTS_MASTER_PATH],
+                "Setting sticky bit (1777) on projects dir",
+                5,
+            )
+            .await;
+        }
+        Ok(Ok(s)) => println!(
+            "  {:<50} [ {}FAILED (Code: {}){} ]",
+            "Projects directory creation",
+            RED, s.code().unwrap_or(-1), RESET
+        ),
+        Ok(Err(err)) => println!(
+            "  {:<50} [ {}IO ERROR: {}{} ]",
+            "Projects directory", RED, err, RESET
+        ),
+        Err(_) => println!(
+            "  {:<50} [ {}TIMEOUT{} ]",
+            "Projects directory timed out", RED, RESET
+        ),
+    }
+}
+
+/// Sets `git config --system safe.directory '*'` to avoid ownership errors.
+async fn configure_git_security() {
+    println!("\n{}Configuring Global Git Security…{}", BOLD, RESET);
+    execute_silent_task(
+        "git",
+        &["config", "--system", "--add", "safe.directory", "*"],
+        "Setting global git safe.directory='*'",
+        10,
+    )
+    .await;
+}
+
+/// Sets `chmod 711 /home` to prevent directory listing by non-owners.
+async fn fix_system_privacy() {
+    println!("\n{}Hardening System Privacy Boundaries…{}", BOLD, RESET);
+    execute_silent_task(
+        "chmod",
+        &["711", "/home"],
+        "Protecting /home directory indexing",
+        10,
+    )
+    .await;
+}
+
+/// Adds sub-UID and sub-GID ranges for LXC namespace mapping.
+async fn setup_lxc_user_subid_mapping(username: &str) {
+    println!("\n{}Setting Up LXC Sub-ID Mapping for '{}'…{}", BOLD, username, RESET);
+    execute_silent_task(
+        "usermod",
+        &[
+            "--add-subuids", "100000-165535",
+            "--add-subgids", "100000-165535",
+            username,
+        ],
+        &format!("Mapping SubUID/SubGID for '{}'", username),
+        15,
+    )
+    .await;
+}
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backup_path_has_melisa_bak_suffix() {
+        let original = "/etc/shells";
+        let backup = format!("{}.melisa.bak", original);
+        assert!(
+            backup.ends_with(".melisa.bak"),
+            "Backup path must end with '.melisa.bak'"
+        );
+    }
+
+    #[test]
+    fn test_quota_rule_format_is_valid() {
+        let username = "testuser";
+        let rule = format!("{} veth lxcbr0 10\n", username);
+        assert!(rule.contains("veth"), "Quota rule must specify veth interface type");
+        assert!(rule.contains("lxcbr0"), "Quota rule must target the lxcbr0 bridge");
+        assert!(rule.contains("10"), "Quota rule must allow 10 veths");
+        assert!(rule.ends_with('\n'), "Quota rule must end with newline");
+    }
+
+    #[test]
+    fn test_projects_master_path_is_set() {
+        assert!(
+            !PROJECTS_MASTER_PATH.is_empty(),
+            "PROJECTS_MASTER_PATH must not be empty"
+        );
+    }
+}

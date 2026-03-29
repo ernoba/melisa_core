@@ -1,0 +1,41 @@
+[package]
+name    = "melisa"
+version = "0.1.3"
+edition = "2021"
+authors = ["Erick Adriano Sebastian"]
+license = "MIT"
+description = "MELISA — Modular Environment for Lightweight Infrastructure & Secure Architecture"
+
+[[bin]]
+name = "melisa"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio       = { version = "1", features = ["full"] }
+
+# CLI / REPL
+rustyline   = "13"
+indicatif   = "0.17"
+
+# Serialization (for .mel TOML manifests)
+serde       = { version = "1", features = ["derive"] }
+toml        = "0.8"
+
+# Structured error types
+thiserror   = "1"
+
+# Random number generation (MAC address generation for container network config)
+rand        = "0.8"
+
+# OS process info (privilege detection)
+libc        = "0.2"
+
+[dev-dependencies]
+# Temporary files for parser unit tests
+tempfile    = "3"
+
+[profile.release]
+strip     = true
+opt-level = 3
+lto       = true
