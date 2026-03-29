@@ -8,5 +8,6 @@ pub mod color;
 pub mod executor;
 pub mod helper;
 pub mod loading;
+pub mod melisa_cli;
 pub mod prompt;
-pub mod welcome;
+pub mod wellcome;

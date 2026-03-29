@@ -31,6 +31,15 @@ rand        = "0.8"
 # OS process info (privilege detection)
 libc        = "0.2"
 
+# Terminal color output — dipakai di wellcome.rs: .cyan(), .bold(), .bright_black(), dll.
+colored     = "2"
+
+# System telemetry (RAM, CPU, hostname) — dipakai di wellcome.rs
+sysinfo     = "0.30"
+
+# Date/time formatting — dipakai di wellcome.rs: chrono::Local::now()
+chrono      = { version = "0.4", features = ["std"] }
+
 [dev-dependencies]
 # Temporary files for parser unit tests
 tempfile    = "3"

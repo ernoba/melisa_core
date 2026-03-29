@@ -26,19 +26,14 @@ async fn main() {
         re_exec_as_root();
     }
 
-    let current_user = env::var("SUDO_USER")
-        .or_else(|_| env::var("USER"))
-        .unwrap_or_else(|_| "unknown".to_string());
-
-    let home_dir = env::var("HOME").unwrap_or_else(|_| format!("/home/{}", current_user));
-
     // Launch the REPL (defined in cli/melisa_cli.rs).
-    cli::repl::start_repl(&current_user, &home_dir).await;
+    // User identity and home directory are resolved internally by Prompt::new().
+    cli::melisa_cli::melisa().await;
 }
 
 /// Returns `true` if the process is running with effective UID 0 (root).
 fn is_running_as_root() -> bool {
-    // SAFETY: getuid() is always safe to call.
+    // SAFETY: geteuid() is always safe to call.
     unsafe { libc::geteuid() == 0 }
 }
 
