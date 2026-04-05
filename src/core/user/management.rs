@@ -229,35 +229,43 @@ pub async fn list_melisa_users() {
     if !ensure_admin().await {
         return;
     }
-
     println!("\n{}--- Registered MELISA Accounts ---{}", BOLD, RESET);
 
+    let mut existing_usernames: Vec<String> = Vec::new();
+
+    // 1. Daftarkan Host User (Admin Utama OS) terlebih dahulu agar tidak dianggap orphan
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        if !sudo_user.is_empty() {
+            existing_usernames.push(sudo_user.clone());
+            let role_tag = format!("{}[HOST ADMINISTRATOR]{}", GREEN, RESET);
+            println!("  > {:<20} {}", sudo_user, role_tag);
+        }
+    }
+
+    // 2. Dapatkan user lain yang dibuat khusus melalui shell MELISA
     let passwd_output = Command::new("sudo")
         .args(&["grep", MELISA_SHELL_PATH, "/etc/passwd"])
         .output()
         .await;
 
-    let mut existing_usernames: Vec<String> = Vec::new();
-
     if let Ok(out) = passwd_output {
         let passwd_text = String::from_utf8_lossy(&out.stdout);
-
         for line in passwd_text.lines() {
             if let Some(username) = line.split(':').next() {
-                existing_usernames.push(username.to_string());
-
-                let role_tag = if sudoers_check_if_admin(username).await {
-                    format!("{}[ADMINISTRATOR]{}", GREEN, RESET)
-                } else {
-                    format!("{}[STANDARD USER]{}", YELLOW, RESET)
-                };
-
-                println!("  > {:<20} {}", username, role_tag);
+                // Hindari duplikasi jika username sama dengan sudo_user
+                if !existing_usernames.contains(&username.to_string()) {
+                    existing_usernames.push(username.to_string());
+                    let role_tag = if sudoers_check_if_admin(username).await {
+                        format!("{}[ADMINISTRATOR]{}", GREEN, RESET)
+                    } else {
+                        format!("{}[STANDARD USER]{}", YELLOW, RESET)
+                    };
+                    println!("  > {:<20} {}", username, role_tag);
+                }
             }
         }
     }
 
-    // Scan for orphaned sudoers configurations.
     println!(
         "\n{}--- Scanning for Orphaned Sudoers Configurations ---{}",
         BOLD, RESET
@@ -387,11 +395,19 @@ pub async fn clean_orphaned_sudoers() {
     if !ensure_admin().await {
         return;
     }
-
     println!(
         "\n{}--- Executing Orphaned Configuration Cleanup ---{}",
         BOLD, RESET
     );
+
+    let mut existing_usernames: Vec<String> = Vec::new();
+
+    // Lindungi Host User
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        if !sudo_user.is_empty() {
+            existing_usernames.push(sudo_user);
+        }
+    }
 
     let passwd_output = Command::new("sudo")
         .args(&["grep", MELISA_SHELL_PATH, "/etc/passwd"])
@@ -400,14 +416,20 @@ pub async fn clean_orphaned_sudoers() {
 
     if let Ok(out) = passwd_output {
         let passwd_text = String::from_utf8_lossy(&out.stdout);
-        let existing_usernames: Vec<String> = passwd_text
+        let melisa_users: Vec<String> = passwd_text
             .lines()
             .filter_map(|line| line.split(':').next().map(|u| u.to_string()))
             .collect();
-
-        // FIX: fungsi yang benar adalah remove_orphaned_sudoers_files (bukan ...from_passwd)
-        remove_orphaned_sudoers_files(&existing_usernames).await;
+        
+        // Gabungkan list tanpa duplikasi
+        for u in melisa_users {
+            if !existing_usernames.contains(&u) {
+                existing_usernames.push(u);
+            }
+        }
     }
+
+    remove_orphaned_sudoers_files(&existing_usernames).await;
 
     println!(
         "{}[DONE]{} System garbage collection completed successfully.",

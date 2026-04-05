@@ -81,25 +81,37 @@ pub async fn ensure_admin() -> bool {
 /// Uses `sudo -n` (non-interactive) so this call **never blocks** waiting
 /// for a password, even in non-TTY / SSH-piped sessions.
 pub async fn check_if_admin(username: &str) -> bool {
+    // 1. Check Sudoers MELISA
     let sudoers_path = format!("/etc/sudoers.d/melisa_{}", username);
-
-    // -n → non-interactive: fail immediately instead of prompting for password.
-    // Since MELISA itself runs as root, this sudo call always succeeds if the
-    // file exists.
     let output = Command::new("sudo")
         .args(&["-n", "cat", &sudoers_path])
         .output()
         .await;
 
-    match output {
-        Ok(out) if out.status.success() => {
+    if let Ok(out) = output {
+        if out.status.success() {
             let content = String::from_utf8_lossy(&out.stdout);
-            // Admin sudoers files contain "useradd" permission;
-            // regular-user files do not.
-            content.contains("useradd")
+            if content.contains("useradd") {
+                return true;
+            }
         }
-        _ => false,
     }
+
+    // 2. FALLBACK: Check Native Host Admin (sudo/wheel group)
+    let group_check = Command::new("id")
+        .arg("-nG")
+        .arg(username)
+        .output()
+        .await;
+
+    if let Ok(out) = group_check {
+        let groups = String::from_utf8_lossy(&out.stdout);
+        if groups.contains("sudo") || groups.contains("wheel") {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Low-level OS UID check. Only used by `main.rs::is_running_as_root()` to
