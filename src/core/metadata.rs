@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 use tokio::fs;
 
-use crate::cli::color::{BOLD, RESET};
+use crate::cli::color::{BOLD, RESET, CYAN, GREEN, YELLOW};
 use crate::core::container::types::LXC_BASE_PATH;
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -132,11 +132,29 @@ pub async fn cleanup_container_metadata(container_name: &str) {
 // ── Version display ───────────────────────────────────────────────────────────
 
 /// Current MELISA server version string.
-const MELISA_VERSION: &str = "0.1.3";
+const MELISA_VERSION: &str = "0.1.4";
+const MELISA_AUTHOR: &str = "Erick Adriano Sebastian";
 
-/// Prints the MELISA server version to stdout.
-pub async fn print_version() {
-    println!("{}MELISA SERVER VERSION{} {}", BOLD, RESET, MELISA_VERSION);
+/// Prints detailed version, developer info, and support request.
+pub async fn print_about() {
+    println!("\n{}━━━ MELISA CORE ENGINE ━━━{}", BOLD, RESET);
+    println!("  {}Version    :{} {}", BOLD, RESET, MELISA_VERSION);
+    println!("  {}Developer  :{} {}", BOLD, RESET, MELISA_AUTHOR);
+    println!("  {}License    :{} MIT", BOLD, RESET);
+    
+    println!("\n{}DESCRIPTION:{}", BOLD, RESET);
+    println!("  Modular Environment for Lightweight Infrastructure & Secure Architecture.");
+    
+    println!("\n{}SUPPORT THIS PROJECT:{}", YELLOW, RESET);
+    println!("  This project is developed openly for the community.");
+    println!("  Support MELISA development by contributing or reaching out:");
+    println!("  {}• GitHub     :{} https://github.com/ernobaproject/melisa_core", GREEN, RESET);
+    println!("  {}• Contact    :{} ernobaproject@gmail.com", GREEN, RESET);
+    println!("  {}• Community  :{} https://t.me/melisa_", GREEN, RESET);
+    println!("  {}• Follow     :{} https://www.instagram.com/melisa.project", GREEN, RESET);
+
+    println!("\n{}Thank you for using MELISA for your sandbox needs!{}", CYAN, RESET);
+    println!();
 }
 
 // ============================================================================

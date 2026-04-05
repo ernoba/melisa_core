@@ -24,6 +24,8 @@ pub enum HostDistro {
     Alpine,
     /// openSUSE Leap / Tumbleweed.
     Suse,
+    /// OrbStack Linux (detected by ID=orbstack in /etc/os-release).
+    OrbStack,
     /// Any distribution not matched by the above families.
     Unknown,
 }
@@ -120,6 +122,20 @@ pub fn get_distro_config(distro: &HostDistro) -> DistroConfig {
             lxc_packages: vec!["lxc".into(), "lxc-templates".into(), "bridge-utils".into()],
             firewall_tool: FirewallKind::Firewalld,
         },
+        HostDistro::OrbStack => DistroConfig {
+            name: "OrbStack Virtual Machine".into(),
+            pkg_manager: "apt-get".into(),
+            lxc_packages: vec![
+                "lxc".into(), 
+                "bridge-utils".into(), 
+                "dnsmasq".into(), 
+                "ufw".into(), 
+                "iptables".into(), 
+                "uidmap".into(), 
+                "openssh-server".into()
+            ],
+            firewall_tool: FirewallKind::Iptables, // Tetap gunakan Iptables untuk OrbStack
+        },
         HostDistro::Unknown => DistroConfig {
             name: "Unknown / Generic".into(),
             pkg_manager: "apt-get".into(),
@@ -143,6 +159,9 @@ fn classify_distro(id: &str) -> HostDistro {
         HostDistro::Alpine
     } else if id.contains("suse") || id.contains("opensuse") {
         HostDistro::Suse
+    } 
+    else if id.contains("orbstack") {
+        HostDistro::OrbStack
     } else {
         HostDistro::Unknown
     }
@@ -291,5 +310,40 @@ mod tests {
         assert_eq!(FirewallKind::Ufw, FirewallKind::Ufw);
         assert_ne!(FirewallKind::Ufw, FirewallKind::Firewalld);
         assert_ne!(FirewallKind::Firewalld, FirewallKind::Iptables);
+    }
+}
+
+#[cfg(test)]
+mod orbstack_tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_distro_detects_orbstack() {
+        // Simulasi string ID dari /etc/os-release OrbStack
+        let orb_id = "orbstack";
+        let result = classify_distro(orb_id);
+        
+        assert_eq!(
+            result, 
+            HostDistro::OrbStack, 
+            "Harus mendeteksi 'orbstack' sebagai HostDistro::OrbStack"
+        );
+    }
+
+    #[test]
+    fn test_orbstack_config_values() {
+        let config = get_distro_config(&HostDistro::OrbStack);
+        
+        assert_eq!(config.pkg_manager, "apt-get");
+        assert_eq!(config.firewall_tool, FirewallKind::Iptables);
+        
+        // Memastikan minimal ada 3 paket dasar yang didefinisikan saat ini
+        assert!(
+            config.lxc_packages.len() >= 3, 
+            "OrbStack minimal harus memiliki paket lxc, lxc-templates, dan uidmap"
+        );
+        
+        // Verifikasi nama tampilan
+        assert!(config.name.contains("OrbStack"));
     }
 }

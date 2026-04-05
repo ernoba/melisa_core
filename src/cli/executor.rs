@@ -27,7 +27,7 @@ use crate::core::container::{
     attach_to_container, send_command, get_container_ip, list_containers,
     upload_to_container, add_shared_folder, remove_shared_folder,
 };
-use crate::core::metadata::{print_version, inspect_container_metadata, MelisaError};
+use crate::core::metadata::{print_about, inspect_container_metadata, MelisaError};
 use crate::core::root_check::admin_check;
 use crate::core::setup::install_host_environment;
 use crate::core::user::{
@@ -187,8 +187,8 @@ async fn dispatch_melisa_subcommand(
             ExecResult::Continue
         }
 
-        "--version" => {
-            print_version().await;
+        "--about" => {
+            print_about().await;
             ExecResult::Continue
         }
 
@@ -710,7 +710,7 @@ async fn print_help(is_audit_mode: bool) {
 
     println!("{}GENERAL COMMANDS{}", BOLD, RESET);
     println!("  --help, -h             Show this help guide");
-    println!("  --version              Show system version");
+    println!("  --about                Show system about info");
     println!("  --ip <n>               Get internal IP of the container");
     println!("  --projects             List all workspace projects");
     println!("  --update <project>     Synchronize project workdir via force-reset");
