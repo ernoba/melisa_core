@@ -33,11 +33,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::cli::color::{BOLD, CYAN, GREEN, RED, RESET};
+use crate::cli::color::{BOLD, CYAN, GREEN, RED, YELLOW, RESET};
 use crate::core::project::management::PROJECTS_MASTER_PATH;
 use crate::distros::host_distro::{detect_host_distro, get_distro_config, FirewallKind};
 
 use crate::core::user::{build_sudoers_rule, check_if_admin, UserRole};
+use crate::core::container::network::is_virtualised_environment; // Gunakan deteksi yang sudah ada
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Runs the full host environment initialization sequence.
@@ -45,19 +46,23 @@ use crate::core::user::{build_sudoers_rule, check_if_admin, UserRole};
 /// Detects the host Linux distribution and installs all required packages,
 /// configures networking, registers the jail shell, and hardens system privacy.
 pub async fn install_host_environment() {
-    // Safety guard: refuse to run over SSH to avoid locking out the operator.
-    if env::var("SSH_CONNECTION").is_ok() || env::var("SSH_CLIENT").is_ok() {
-        eprintln!(
-            "{}[BLOCKED]{} Setup must be run directly on the physical console, \
-            not over an SSH session.",
-            RED, RESET
-        );
-        eprintln!(
-            "{}[INFO]{} This restriction prevents accidental firewall misconfiguration \
-            that could sever your remote connection.",
-            BOLD, RESET
-        );
-        return;
+    // Logika baru yang lebih pintar
+    if is_risky_remote_session().await {
+        // Cek apakah user memberikan flag --force-unsafe untuk bypass manual
+        let args: Vec<String> = env::args().collect();
+        if !args.contains(&"--force-unsafe".to_string()) {
+            eprintln!("{}[BLOCKED]{} Sesi SSH Remote terdeteksi.", RED, RESET);
+            eprintln!(
+                "{}[SAFETY]{} Setup dihentikan untuk mencegah lockout firewall.",
+                BOLD, RESET
+            );
+            eprintln!(
+                "{}[INFO]{} Jika Anda yakin, jalankan kembali dengan: {}melisa --setup --force-unsafe{}",
+                YELLOW, RESET, BOLD, RESET
+            );
+            return;
+        }
+        println!("{}[WARNING]{} Menjalankan setup pada sesi remote atas permintaan user.", YELLOW, RESET);
     }
 
     let host_distro = detect_host_distro().await;
@@ -281,6 +286,34 @@ async fn copy_binary_to_system() {
             "Binary copy timed out", RED, RESET
         ),
     }
+}
+
+// SSH session detection with smart IP filtering to allow localhost SSH but block remote sessions without console access.
+async fn is_risky_remote_session() -> bool {
+    // 1. Cek apakah ini lingkungan OrbStack atau VM Lokal.
+    // Jika iya, setup selalu aman karena operator memiliki akses konsol fisik melalui Host.
+    if is_virtualised_environment().await {
+        return false; 
+    }
+
+    // 2. Jika variabel SSH tidak ada, berarti sesi lokal (Aman).
+    let ssh_conn = match env::var("SSH_CONNECTION") {
+        Ok(val) => val,
+        Err(_) => return false,
+    };
+
+    // 3. Analisis IP Asal (Smart IP Filtering).
+    // SSH_CONNECTION formatnya: "IP_CLIENT PORT_CLIENT IP_SERVER PORT_SERVER"
+    let parts: Vec<&str> = ssh_conn.split_whitespace().collect();
+    if let Some(client_ip) = parts.get(0) {
+        // Jika koneksi berasal dari localhost (127.0.0.1 atau ::1), ini aman.
+        if *client_ip == "127.0.0.1" || *client_ip == "::1" || *client_ip == "localhost" {
+            return false;
+        }
+    }
+
+    // 4. Jika sampai sini dan SSH_CONNECTION ada, berarti ini benar-benar sesi remote.
+    true
 }
 
 /// Configures the host firewall to allow SSH and LXC bridge traffic.
