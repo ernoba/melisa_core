@@ -34,7 +34,7 @@ use crate::distros::host_distro::{detect_host_distro, get_distro_config, Firewal
 /// Returns `true` if MELISA is running inside a virtualised environment
 /// (OrbStack, VirtualBox, KVM, etc.) where `lxc-net` might be blocked by
 /// the systemd `ConditionVirtualization` guard.
-async fn is_virtualised_environment() -> bool {
+pub async fn is_virtualised_environment() -> bool {
     // Cek via systemd-detect-virt
     let output = Command::new("systemd-detect-virt").output().await;
     let detected_by_systemd = match output {

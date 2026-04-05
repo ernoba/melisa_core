@@ -700,7 +700,7 @@ async fn handle_container_info(name: &str) {
 async fn print_help(is_audit_mode: bool) {
     let is_admin = admin_check().await;
 
-    println!("\n{}MELISA CONTROL INTERFACE — VERSION 0.1.3{}", BOLD, RESET);
+    println!("\n{}MELISA CONTROL INTERFACE — VERSION 0.1.4{}", BOLD, RESET);
     println!("Usage: melisa [options] [--audit]\n");
     println!(
         "{}[--audit]{} can be added to any command to display hidden logs\n\
