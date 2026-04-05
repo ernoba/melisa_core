@@ -37,6 +37,7 @@ use crate::cli::color::{BOLD, CYAN, GREEN, RED, RESET};
 use crate::core::project::management::PROJECTS_MASTER_PATH;
 use crate::distros::host_distro::{detect_host_distro, get_distro_config, FirewallKind};
 
+use crate::core::user::{build_sudoers_rule, check_if_admin, UserRole};
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Runs the full host environment initialization sequence.
@@ -80,9 +81,13 @@ pub async fn install_host_environment() {
     configure_git_security().await;
     fix_system_privacy().await;
 
+    // If we have a valid SUDO_USER, set up sub-ID mapping and admin privileges for them.
     if let Ok(username) = env::var("SUDO_USER") {
         if !username.is_empty() {
             setup_lxc_user_subid_mapping(&username).await;
+            
+            // Panggil helper khusus setup untuk mengatur privileges
+            setup_host_user_admin_privileges(&username).await;
         }
     }
 
@@ -533,6 +538,64 @@ async fn setup_lxc_user_subid_mapping(username: &str) {
         15,
     )
     .await;
+}
+
+/// Grants the specified user MELISA administrator privileges by modifying their sudoers file.
+/// Grants MELISA Administrator privileges to the host user cleanly during setup
+async fn setup_host_user_admin_privileges(username: &str) {
+    println!(
+        "\n{}Granting MELISA Admin Privileges to Host User '{}'…{}",
+        BOLD, username, RESET
+    );
+
+    // Cek apakah user sudah memiliki akses admin
+    if check_if_admin(username).await {
+        println!(
+            "  {:<50} [ {}SKIPPED{} ]",
+            "Admin privileges already configured", CYAN, RESET
+        );
+        return;
+    }
+
+    let sudoers_rule = build_sudoers_rule(username, &UserRole::Admin);
+    let sudoers_path = format!("/etc/sudoers.d/melisa_{}", username);
+
+    // Tulis aturan sudoers langsung menggunakan file system as root
+    match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&sudoers_path)
+        .await
+    {
+        Ok(mut file) => {
+            if let Err(err) = file.write_all(sudoers_rule.as_bytes()).await {
+                println!(
+                    "  {:<50} [ {}IO ERROR{} ] {}",
+                    "Deploying admin sudoers rule", RED, RESET, err
+                );
+            } else {
+                // Set permission ke 0440 wajib untuk file sudoers
+                execute_silent_task(
+                    "chmod",
+                    &["0440", &sudoers_path],
+                    "Applying strict permissions (0440)",
+                    5,
+                )
+                .await;
+
+                println!(
+                    "  {:<50} [ {}OK{} ]",
+                    format!("Admin privileges granted to '{}'", username),
+                    GREEN, RESET
+                );
+            }
+        }
+        Err(err) => println!(
+            "  {:<50} [ {}ACCESS DENIED{} ] {}",
+            "Deploying admin sudoers rule", RED, RESET, err
+        ),
+    }
 }
 
 // ============================================================================
