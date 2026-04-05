@@ -107,7 +107,7 @@ fn display_system_dashboard(sys: &mut System) {
         r#" ╚═╝     ╚═╝╚══════╝╚══════╝╚═╝╚══════╝╚═╝  ╚═╝ "#,
         r#"    [ MANAGEMENT ENVIRONMENT LINUX SANDBOX ]    "#,
         r#""#,
-        r#"[v - 0.1.3 | delta version]"#,
+        r#"[v - 0.1.4 | delta version]"#,
     ];
 
     for line in melisa_text {
@@ -130,8 +130,6 @@ fn display_system_dashboard(sys: &mut System) {
         ("GPU_STATUS", get_gpu_info(), Color::White),
         ("RAM_USAGE ", format!("{}MB / {}MB ({}%)", used_ram, total_ram, ram_percent), if ram_percent > 80 { Color::Red } else { Color::Green }),
         ("----------", "".to_string(), Color::BrightBlack),
-        ("PROTOCOL  ", "SECURE ISOLATION ACTIVE".to_string(), Color::Cyan),
-        ("DIRECTIVE ", "MAXIMUM PERFORMANCE // ZERO INEFFICIENCY".to_string(), Color::Cyan),
     ];
 
     for (k, v, col) in specs {
