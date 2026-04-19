@@ -2,14 +2,14 @@
 // PATCH: client/src/auth.rs
 // ============================================================
 //
-// RINGKASAN PERUBAHAN:
-//  1. deploy_ssh_key        — Hapus interpolasi pub_key ke shell string.
-//                             Gunakan stdin pipe ke `sh` di remote agar
-//                             tidak ada shell quoting yang bisa di-escape.
-//  2. auth_add              — Validasi melisa_user input dari stdin
-//                             menggunakan fungsi validate_username baru.
-//  3. configure_ssh_multiplexing — Tambah validasi karakter untuk `host`
-//                             dan `user` sebelum ditulis ke SSH config.
+// SUMMARY OF CHANGES:
+//  1. deploy_ssh_key        — Remove pub_key interpolation to shell string.
+//                             Use stdin pipe to `sh` at remote to avoid
+//                             shell quoting escapes.
+//  2. auth_add              — Validate melisa_user input from stdin
+//                             using new validate_username function.
+//  3. configure_ssh_multiplexing — Add character validation for `host`
+//                             and `user` before writing to SSH config.
 // ============================================================
 
 use std::fs::{self, OpenOptions};
@@ -67,46 +67,46 @@ fn set_perms_600(path: &Path) {
     }
 }
 
-// ── FIX #2: Validasi username MELISA ─────────────────────────────────────────
+// ── FIX #2: MELISA username validation ───────────────────────────────────────
 //
-// SEBELUMNYA: tidak ada validasi sama sekali pada input username.
-// SESUDAHNYA: hanya izinkan huruf, angka, hyphen, dan underscore;
-//             panjang dibatasi antara 1–32 karakter sesuai batas POSIX.
+// BEFORE: no validation whatsoever on username input.
+// AFTER: allow only letters, digits, hyphen, and underscore;
+//        length limited to 1–32 characters per POSIX limits.
 //
 fn validate_username(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 32 {
         return Err(format!(
-            "Username '{}' harus antara 1–32 karakter.", name
+            "Username '{}' must be between 1–32 characters.", name
         ));
     }
-    // POSIX: username tidak boleh dimulai dengan angka atau '-'
+    // POSIX: username must not start with digit or '-'
     if name.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
         return Err(format!(
-            "Username '{}' tidak boleh diawali angka atau '-'.", name
+            "Username '{}' must not start with digit or '-'.", name
         ));
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(format!(
-            "Username '{}' hanya boleh mengandung huruf, angka, '-', dan '_'.", name
+            "Username '{}' can only contain letters, digits, '-', and '_'.", name
         ));
     }
     Ok(())
 }
 
-// ── FIX #3: Validasi karakter SSH config ─────────────────────────────────────
+// ── FIX #3: SSH config character validation ──────────────────────────────────
 //
-// Periksa bahwa nilai host/user tidak mengandung karakter yang bisa
-// menyuntikkan directive baru ke dalam SSH config file.
+// Check that host/user values don't contain characters that can
+// inject new directives into SSH config file.
 //
 fn validate_ssh_config_value(value: &str, field: &str) -> io::Result<()> {
-    // Newline dan carriage-return bisa inject directive baru ke config file.
-    // Spasi dan '#' juga berbahaya dalam nilai SSH config.
+    // Newline and carriage-return can inject new directives to config file.
+    // Spaces and '#' are also dangerous in SSH config values.
     let forbidden: &[char] = &['\n', '\r', '\0', '#'];
     for ch in forbidden {
         if value.contains(*ch) {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
-                format!("SSH config {field} mengandung karakter terlarang: {ch:?}"),
+                format!("SSH config {field} contains forbidden character: {ch:?}"),
             ));
         }
     }
@@ -176,10 +176,10 @@ pub fn auth_add(name: &str, user_host: &str) -> io::Result<()> {
     std::io::stdin().read_line(&mut melisa_user)?;
     let melisa_user = melisa_user.trim().to_string();
 
-    // ── FIX #2 diterapkan di sini ─────────────────────────────────────────
-    // SEBELUMNYA: langsung pakai melisa_user tanpa validasi apapun.
-    // SESUDAHNYA: validasi sebelum disimpan ke profiles.conf dan dipakai
-    //             untuk membangun path di remote server.
+    // ── FIX #2 applied here ──────────────────────────────────────────────
+    // BEFORE: use melisa_user directly without any validation.
+    // AFTER: validate before saving to profiles.conf and using
+    //        to build paths on remote server.
     let melisa_user = if melisa_user.is_empty() {
         ssh_user.clone()
     } else {
@@ -308,18 +308,18 @@ fn ensure_ssh_key() -> io::Result<()> {
     }
 }
 
-// ── FIX #1: deploy_ssh_key — Hilangkan interpolasi pub_key ke shell string ───
+// ── FIX #1: deploy_ssh_key — Remove pub_key interpolation to shell string ──────
 //
-// SEBELUMNYA (BERBAHAYA):
+// BEFORE (DANGEROUS):
 //   let remote_cmd = format!("echo '{pub_key}' >> ~/.ssh/authorized_keys");
-//   Jika pub_key mengandung ' (misal di bagian comment), attacker bisa inject
-//   perintah ke remote server.
+//   If pub_key contains ' (e.g., in comment section), attacker can inject
+//   command to remote server.
 //
-// SESUDAHNYA (AMAN):
-//   Kirim isi public key melalui STDIN ssh, bukan lewat argumen string.
-//   Script remote sepenuhnya hardcoded — tidak ada data user yang
-//   diinterpolasi ke dalam shell command.
-//   Pola ini identik dengan cara kerja ssh-copy-id.
+// AFTER (SAFE):
+//   Send public key content via STDIN ssh, not as string argument.
+//   Remote script is entirely hardcoded — no user data is
+//   interpolated into shell command.
+//   This pattern is identical to how ssh-copy-id works.
 //
 fn deploy_ssh_key(user_host: &str) -> io::Result<()> {
     if has_ssh_copy_id() {
@@ -339,18 +339,18 @@ fn deploy_ssh_key(user_host: &str) -> io::Result<()> {
 
     let pub_key = fs::read_to_string(&key_path)?.trim().to_string();
 
-    // Validasi pub_key: harus satu baris dan tidak mengandung newline
-    // (kunci publik yang valid selalu satu baris).
+    // Validate pub_key: must be single line with no newlines
+    // (valid public keys are always single line).
     if pub_key.contains('\n') || pub_key.contains('\r') {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
-            "Public key file mengandung multiple baris — format tidak valid.",
+            "Public key file contains multiple lines — invalid format.",
         ));
     }
 
-    // Script remote sepenuhnya hardcoded; data dikirim lewat stdin, bukan
-    // diinterpolasi ke dalam command string.
-    // `cat >> authorized_keys` membaca dari stdin yang kita pipe.
+    // Remote script is entirely hardcoded; data sent via stdin, not
+    // interpolated into command string.
+    // `cat >> authorized_keys` reads from stdin that we pipe.
     let remote_script = "\
         mkdir -p ~/.ssh && \
         chmod 700 ~/.ssh && \
@@ -362,11 +362,11 @@ fn deploy_ssh_key(user_host: &str) -> io::Result<()> {
         .stdin(std::process::Stdio::piped())
         .spawn()?;
 
-    // Kirim public key + newline ke stdin remote script
+    // Send public key + newline to stdin of remote script
     if let Some(mut stdin) = child.stdin.take() {
-        // Tulis key + newline agar baris baru ditambahkan dengan benar
+        // Write key + newline so new line is added correctly
         stdin.write_all(format!("{pub_key}\n").as_bytes())?;
-        // stdin ditutup otomatis saat drop → remote `cat` selesai membaca
+        // stdin dropped automatically → remote `cat` finishes reading
     }
 
     let status = child.wait()?;
@@ -379,18 +379,18 @@ fn deploy_ssh_key(user_host: &str) -> io::Result<()> {
     }
 }
 
-// ── FIX #3: configure_ssh_multiplexing — Validasi host & user ────────────────
+// ── FIX #3: configure_ssh_multiplexing — Validate host & user ────────────────
 //
-// SEBELUMNYA: host dan user diinterpolasi langsung ke string SSH config
-//             tanpa pemeriksaan karakter berbahaya.
-// SESUDAHNYA: validasi kedua nilai sebelum menulis ke file config.
+// BEFORE: host and user interpolated directly to SSH config string
+//         without checking for dangerous characters.
+// AFTER: validate both values before writing to config file.
 //
 fn configure_ssh_multiplexing(user_host: &str) -> io::Result<()> {
     let Some(sockets_dir) = ssh_sockets_dir() else { return Ok(()); };
     let host = user_host.split('@').nth(1).unwrap_or(user_host);
     let user = user_host.split('@').next().unwrap_or("");
 
-    // FIX: validasi sebelum menulis ke SSH config file
+    // FIX: validate before writing to SSH config file.
     validate_ssh_config_value(host, "host")?;
     validate_ssh_config_value(user, "user")?;
 

@@ -25,6 +25,7 @@ use crate::core::container::query::is_container_running;
 use crate::core::container::types::{LXC_BASE_PATH, DistroMetadata};
 use crate::core::metadata::{cleanup_container_metadata, write_container_metadata};
 use crate::core::root_check::ensure_admin;
+use crate::distros::container::{get_container_pkg_manager, get_pkg_update_cmd};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -95,37 +96,11 @@ async fn wait_for_network_initialization(name: &str, pb: &ProgressBar) -> bool {
 // ---------------------------------------------------------------------------
 // Package manager helpers
 // ---------------------------------------------------------------------------
+// NOTE: These functions have been moved to crate::distros::container module
+// as the single source of truth. They are now thin wrappers for backward compatibility.
 
 fn get_pkg_manager_for_distro(distro_name: &str) -> &'static str {
-    let name = distro_name.to_lowercase();
-    if name.contains("ubuntu") || name.contains("debian") || name.contains("kali")
-        || name.contains("mint") || name.contains("raspbian") || name.contains("linuxmint")
-    {
-        "apt"
-    } else if name.contains("fedora") || name.contains("centos") || name.contains("rhel")
-        || name.contains("rocky") || name.contains("alma")
-    {
-        "dnf"
-    } else if name.contains("alpine") {
-        "apk"
-    } else if name.contains("arch") || name.contains("manjaro") {
-        "pacman"
-    } else if name.contains("suse") || name.contains("opensuse") {
-        "zypper"
-    } else {
-        "apt" // sane default for unknown distros and support on mac
-    }
-}
-
-fn get_pkg_update_cmd(pkg_manager: &str) -> &'static str {
-    match pkg_manager {
-        "apt" | "apt-get" => "apt-get update -y",
-        "dnf" | "yum"     => "dnf makecache",
-        "apk"             => "apk update",
-        "pacman"          => "pacman -Sy --noconfirm",
-        "zypper"          => "zypper --non-interactive refresh",
-        _                 => "true",
-    }
+    get_container_pkg_manager(distro_name)
 }
 
 async fn auto_initial_setup(name: &str, distro_name: &str, pb: &ProgressBar, audit: bool) {

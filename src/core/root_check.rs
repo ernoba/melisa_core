@@ -83,18 +83,18 @@ pub async fn ensure_admin() -> bool {
 pub async fn check_if_admin(username: &str) -> bool {
     let sudoers_path = format!("/etc/sudoers.d/melisa_{}", username);
 
-    // PERBAIKAN: Baca file secara langsung menggunakan tokio::fs.
-    // Karena MELISA sudah berjalan sebagai root (setelah re-exec), 
-    // ia memiliki izin penuh untuk membaca direktori /etc/sudoers.d/.
+    // FIX: Read file directly using tokio::fs.
+    // Since MELISA is already running as root (after re-exec),
+    // it has full permissions to read /etc/sudoers.d/ directory.
     if let Ok(content) = tokio::fs::read_to_string(&sudoers_path).await {
-        // Logika internal MELISA: Jika file sudoers mengandung 'useradd', 
-        // berarti user ini adalah Administrator MELISA.
+        // MELISA internal logic: If sudoers file contains 'useradd',
+        // this user is a MELISA Administrator.
         if content.contains("useradd") {
             return true;
         }
     }
 
-    // FALLBACK: Cek apakah user ada di grup sudo/wheel sistem host
+    // FALLBACK: Check if user is in sudo/wheel group on host system.
     let group_check = tokio::process::Command::new("id")
         .arg("-nG")
         .arg(username)

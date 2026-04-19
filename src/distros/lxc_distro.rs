@@ -165,12 +165,12 @@ pub async fn fetch_distro_list_from_network(audit: bool) -> (Vec<DistroMetadata>
         {
             let content = String::from_utf8_lossy(&out.stdout).to_string();
             if !content.is_empty() {
-                // Tulis cache file
+                // Write cache file.
                 let _ = fs::write(DISTRO_CACHE_PATH, &content).await;
  
-                // FIX: chmod 644 bukan 666
-                // 644 = owner baca+tulis, group baca, others baca
-                // 666 sebelumnya = semua orang bisa tulis (berbahaya!)
+                // FIX: chmod 644 not 666
+                // 644 = owner read+write, group read, others read
+                // 666 previously = everyone can write (dangerous!)
                 let _ = Command::new("sudo")
                     .args(&["chmod", "644", DISTRO_CACHE_PATH])
                     .status()
@@ -201,7 +201,7 @@ pub async fn fetch_distro_list_from_network(audit: bool) -> (Vec<DistroMetadata>
 
 /// Fallback distribution list fetch via `lxc-create -t download --list`.
 pub async fn fetch_distro_list_fallback(audit: bool) -> (Vec<DistroMetadata>, bool) {
-    // Bersihkan container probe yang mungkin tertinggal dari run sebelumnya
+    // Clean up probe container that may be left over from previous run.
     let _ = Command::new("sudo")
         .args(&["-n", "lxc-destroy", "-n", "MELISA_PROBE_UNUSED", "-f"])
         .output()
@@ -222,10 +222,10 @@ pub async fn fetch_distro_list_fallback(audit: bool) -> (Vec<DistroMetadata>, bo
         Ok(out) if !out.stdout.is_empty() => {
             let content = String::from_utf8_lossy(&out.stdout).to_string();
  
-            // Tulis cache
+            // Write cache.
             let _ = fs::write(DISTRO_CACHE_PATH, &content).await;
  
-            // FIX: chmod 644, bukan 666
+            // FIX: chmod 644, not 666
             let _ = Command::new("sudo")
                 .args(&["chmod", "644", DISTRO_CACHE_PATH])
                 .status()
@@ -348,9 +348,9 @@ mod tests {
     }
         #[test]
     fn test_cache_permission_is_not_world_writable() {
-        // Dokumentasi permission yang benar sebagai test guardrail.
+        // Document correct permissions as test guardrail.
         // Permission octal 0o644 = rw-r--r-- (owner write, others read-only)
-        // Permission octal 0o666 = rw-rw-rw- (world-writable — DILARANG)
+        // Permission octal 0o666 = rw-rw-rw- (world-writable — FORBIDDEN)
         let expected_permission: u32 = 0o644;
         let forbidden_permission: u32 = 0o666;
  
@@ -359,7 +359,7 @@ mod tests {
             "Cache file must use 644, not world-writable 666"
         );
  
-        // Pastikan 644 bukan world-writable
+        // Ensure 644 is not world-writable.
         let others_write_bit = expected_permission & 0o002;
         assert_eq!(
             others_write_bit, 0,

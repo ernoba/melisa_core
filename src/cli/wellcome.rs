@@ -8,10 +8,10 @@ use std::thread;
 use std::time::Duration;
 use chrono::Local;
 
-// --- KONFIGURASI ENGINE ---
+// --- ENGINE CONFIGURATION ---
 const GLITCH_CHARS: &[u8] = b"01X#?!<>[]{}|";
 
-// Pesan log sistem profesional (Menggantikan pesan imut)
+// Professional system log messages (replacing cute messages)
 const SYSTEM_LOGS: &[&str] = &[
     "Initializing core subsystem...",
     "Mapping virtual memory pages...",
@@ -26,20 +26,20 @@ const SYSTEM_LOGS: &[&str] = &[
 pub fn display_melisa_banner() {
     clear_screen();
     
-    // FASE 1: Boot Sequence (Animasi tetap ada, pesan diubah)
+    // PHASE 1: Boot Sequence (Animation remains, message updated)
     system_boot_sequence();
     
-    // FASE 2: Animasi Dekripsi Payload (Warna diubah ke Cyan)
+    // PHASE 2: Decryption Animation (Color changed to Cyan)
     decrypt_core_animation();
     
-    // FASE 3: Reconnaissance
+    // PHASE 3: Reconnaissance
     let mut sys = System::new_all();
     sys.refresh_all();
     
-    // FASE 4: Render Dashboard (Gaya Industrial)
+    // PHASE 4: Render Dashboard (Industrial style)
     display_system_dashboard(&mut sys);
     
-    // FASE 5: Security Enforcement
+    // PHASE 5: Security Enforcement
     enforce_isolation_directives();
 }
 
@@ -52,7 +52,7 @@ fn sleep_ms(ms: u64) {
     thread::sleep(Duration::from_millis(ms));
 }
 
-// --- FASE 1: SYSTEM BOOT SEQUENCE ---
+// --- PHASE 1: SYSTEM BOOT SEQUENCE ---
 fn system_boot_sequence() {
     let mut rng = rand::thread_rng();
     println!("\n  {}", ">> INITIALIZING CORE ENGINE...".cyan().bold());
@@ -66,7 +66,7 @@ fn system_boot_sequence() {
     }
 }
 
-// --- FASE 2: DECRYPT ANIMATION ---
+// --- PHASE 2: DECRYPT ANIMATION ---
 fn decrypt_core_animation() {
     let mut rng = rand::thread_rng();
     let target_text = "M.E.L.I.S.A // SYSTEM_STABLE_ENVIRONMENT";
@@ -78,7 +78,7 @@ fn decrypt_core_animation() {
         for _ in 0..2 {
             current[i] = *GLITCH_CHARS.choose(&mut rng).unwrap() as char;
             let display: String = current.iter().collect();
-            // Animasi glitch tetap ada, warna ganti ke Cyan/Blue
+            // Glitch animation preserved, color changed to Cyan/Blue
             print!("\r  {} {} ", "[ PROC ] DECRYPTING KERNEL:".cyan().bold(), display.on_cyan().black());
             io::stdout().flush().unwrap();
             sleep_ms(15);
@@ -89,7 +89,7 @@ fn decrypt_core_animation() {
     sleep_ms(400);
 }
 
-// --- FASE 4: INDUSTRIAL DASHBOARD ---
+// --- PHASE 4: INDUSTRIAL DASHBOARD ---
 fn display_system_dashboard(sys: &mut System) {
     clear_screen();
 
@@ -114,7 +114,7 @@ fn display_system_dashboard(sys: &mut System) {
         println!("  {}", line.cyan().bold());
     }
 
-    // TELEMETRY DENGAN BORDER BERSIH
+    // TELEMETRY WITH CLEAN BORDER
     println!("\n  {}", "┌─── SYSTEM TELEMETRY & STATUS ──────────────────────────────────────┐".bright_black());
     
     let time_now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -152,7 +152,7 @@ fn display_system_dashboard(sys: &mut System) {
     println!("  {}", "└────────────────────────────────────────────────────────────────────┘".bright_black());
 }
 
-// --- FASE 5: SECURITY ENFORCEMENT ---
+// --- PHASE 5: SECURITY ENFORCEMENT ---
 fn enforce_isolation_directives() {
     println!("\n  {}", ">>> ALL SYSTEMS OPERATIONAL. SECURE SESSION GRANTED.".green().bold());
     print!("  {} ", "ENTER COMMAND:".bright_black().bold());

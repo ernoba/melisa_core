@@ -2,14 +2,14 @@
 // PATCH: client/src/exec.rs
 // ============================================================
 //
-// RINGKASAN PERUBAHAN:
-//  1. exec_forward    — Setiap token argumen divalidasi dengan check_arg
-//                       dan di-escape sebelum dikirim ke remote shell.
-//  2. exec_run_tty    — Hanya upload file target saja (bukan seluruh dir)
-//                       untuk mencegah kebocoran file sensitif.
-//  3. exec_tunnel     — Prevent zombie process dengan spawn background task
-//                       yang menunggu child process selesai.
-//  4. upload_to_container (server-side fix ada di query_fixes.rs)
+// SUMMARY OF CHANGES:
+//  1. exec_forward    — Each argument token validated with check_arg
+//                       and escaped before sending to remote shell.
+//  2. exec_run_tty    — Upload only target file (not entire directory)
+//                       to prevent leakage of sensitive files.
+//  3. exec_tunnel     — Prevent zombie process with background task
+//                       that waits for child process to finish.
+//  4. upload_to_container (server-side fix in query_fixes.rs)
 // ============================================================
 
 use std::fs::{self, DirEntry};
@@ -49,13 +49,13 @@ fn check_arg(arg: &str) -> Result<(), String> {
     }
 }
 
-// ── FIX #1 helper: Shell-escape satu token untuk penggunaan dalam double-quote
+// ── FIX #1 helper: Shell-escape single token for use within double-quote
 //
-// Hanya karakter yang benar-benar harus di-escape dalam double-quoted string
-// yang ditangani: backslash, dollar, backtick, dan double-quote.
-// Pendekatan ini aman karena token sudah lolos sanitise_arg sebelumnya
-// (tidak ada ; & | < > newline) — escape ini hanya untuk perlindungan
-// lapisan kedua terhadap $ dan ` yang mungkin lolos di masa depan.
+// Only characters that must truly be escaped in double-quoted string
+// are handled: backslash, dollar, backtick, and double-quote.
+// This approach is safe because token already passed sanitise_arg
+// (no ; & | < > newline) — this escape is only second-layer protection
+// against $ and ` that may slip through in the future.
 //
 fn shell_escape_token(token: &str) -> String {
     let mut out = String::with_capacity(token.len() + 4);
@@ -91,10 +91,10 @@ fn upload_via_tar_ssh(conn: &str, container: &str, local_dir: &str, dest_path: &
     }
 }
 
-// ── Helper: Upload hanya satu file tunggal via SSH stdin ─────────────────────
+// ── Helper: Upload only single file via SSH stdin ──────────────────────────
 //
-// Dipakai oleh exec_run_tty untuk mengirim satu file saja tanpa
-// meng-upload seluruh direktori parent-nya.
+// Used by exec_run_tty to send only one file without
+// uploading entire parent directory.
 //
 fn upload_single_file_via_ssh(conn: &str, container: &str, local_file: &str, dest_dir: &str) -> io::Result<()> {
     let filename = std::path::Path::new(local_file)
@@ -102,7 +102,7 @@ fn upload_single_file_via_ssh(conn: &str, container: &str, local_file: &str, des
         .and_then(|s| s.to_str())
         .unwrap_or("file");
 
-    // Buat temporary tar yang hanya berisi satu file
+    // Create temporary tar with only single file
     let mut tar = Command::new("tar")
         .args(["-czf", "-", "-C",
             std::path::Path::new(local_file)
@@ -165,17 +165,17 @@ pub fn exec_upload(container: &str, local_dir: &str, dest_path: &str) -> io::Res
     Ok(())
 }
 
-// ── FIX #2: exec_run_tty — Upload hanya file target, bukan seluruh direktori ─
+// ── FIX #2: exec_run_tty — Upload only target file, not entire directory ─────
 //
-// SEBELUMNYA (BERBAHAYA):
+// BEFORE (DANGEROUS):
 //   let dir = Path::new(file).parent().unwrap_or(".");
 //   upload_via_tar_ssh(&conn, container, dir, "/tmp")?;
-//   → Seluruh isi direktori parent dikirim ke /tmp container.
-//     Jika file ada di ~/projects/myapp/, maka .env, secrets, kunci API
-//     ikut terkirim.
+//   → Entire contents of parent directory sent to container /tmp.
+//     If file is in ~/projects/myapp/, then .env, secrets, API keys
+//     are also sent.
 //
-// SESUDAHNYA (AMAN):
-//   Gunakan upload_single_file_via_ssh yang hanya mengirim satu file saja.
+// AFTER (SAFE):
+//   Use upload_single_file_via_ssh which sends only one file.
 //
 pub fn exec_run_tty(container: &str, file: &str) -> io::Result<()> {
     let conn = require_conn()
@@ -194,7 +194,7 @@ pub fn exec_run_tty(container: &str, file: &str) -> io::Result<()> {
 
     log_info(&format!("Provisioning artifact '{BOLD}{filename}{RESET}' in remote container..."));
 
-    // FIX: hanya upload satu file, bukan seluruh direktori
+    // FIX: upload only single file, not entire directory.
     upload_single_file_via_ssh(&conn, container, file, "/tmp")?;
 
     log_success("Interactive session (TTY) initialized...");
@@ -285,17 +285,17 @@ pub fn exec_tunnel(container: &str, remote_port: u16, local_port: Option<u16>) -
         "Starting SSH tunnel: localhost:{lport} → {container}:{remote_port} via {conn}..."
     ));
 
-    // ── FIX #3: Cegah zombie process ────────────────────────────────────────
+    // ── FIX #3: Prevent zombie process ──────────────────────────────────────
     //
-    // SEBELUMNYA (BERMASALAH):
+    // BEFORE (PROBLEMATIC):
     //   let child = Command::new(ssh_bin()).spawn()?;
     //   let pid = child.id();
-    //   // child di-drop → zombie saat SSH keluar
+    //   // child dropped → becomes zombie when SSH exits
     //
-    // SESUDAHNYA (AMAN):
-    //   Spawn thread OS terpisah yang bertanggung jawab menunggu child.
-    //   Thread ini ringan karena hanya blocking-wait, dan auto-cleanup
-    //   saat SSH process keluar.
+    // AFTER (SAFE):
+    //   Spawn separate OS thread responsible for waiting on child.
+    //   This thread is lightweight because it's just blocking-wait,
+    //   and auto-cleanup when SSH process exits.
     //
     let mut child = Command::new(ssh_bin())
         .args(["-N", "-L", &bind_expr, &conn])
@@ -306,7 +306,7 @@ pub fn exec_tunnel(container: &str, remote_port: u16, local_port: Option<u16>) -
 
     let pid = child.id();
 
-    // Spawn thread reaper agar child tidak menjadi zombie
+    // Spawn reaper thread so child doesn't become zombie.
     std::thread::spawn(move || {
         let _ = child.wait(); // blocking wait; otomatis cleanup zombie
     });
@@ -395,31 +395,31 @@ pub fn exec_tunnel_stop(container: &str, remote_port: Option<u16>) -> io::Result
     Ok(())
 }
 
-// ── FIX #1: exec_forward — Validasi dan escape setiap token argumen ──────────
+// ── FIX #1: exec_forward — Validate and escape each argument token ────────────
 //
-// SEBELUMNYA (BERBAHAYA):
+// BEFORE (DANGEROUS):
 //   Command::new(ssh_bin())
 //       .arg(&conn)
 //       .arg(&format!("melisa {}", parts.join(" ")))
-//   → parts.join(" ") tanpa escape → shell injection di remote.
-//     Tidak ada check_arg yang dipanggil sebelumnya.
+//   → parts.join(" ") without escape → shell injection at remote.
+//     No check_arg called beforehand.
 //
-// SESUDAHNYA (AMAN):
-//   1. Setiap token divalidasi dengan check_arg (blokir metachar & traversal).
-//   2. Setiap token di-escape dengan shell_escape_token sebelum digabung.
-//   3. String gabungan dibungkus agar aman dieksekusi oleh remote shell.
+// AFTER (SAFE):
+//   1. Each token validated with check_arg (block metachar & traversal).
+//   2. Each token escaped with shell_escape_token before joining.
+//   3. Joined string wrapped so it's safe to execute by remote shell.
 //
 pub fn exec_forward(command: &str, args: &[String]) -> io::Result<()> {
     let conn = require_conn()
         .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "no active connection"))?;
 
-    // Validasi command token
+    // Validate command token
     if let Err(e) = check_arg(command) {
         log_error(&format!("Invalid command token: {e}"));
         return Ok(());
     }
 
-    // Validasi setiap argumen
+    // Validate each argument
     for arg in args {
         if let Err(e) = check_arg(arg) {
             log_error(&format!("Invalid argument '{}': {e}", arg));
@@ -427,7 +427,7 @@ pub fn exec_forward(command: &str, args: &[String]) -> io::Result<()> {
         }
     }
 
-    // Escape dan gabungkan semua token dengan aman
+    // Escape and safely join all tokens
     let mut escaped_parts = vec![shell_escape_token(command)];
     for arg in args {
         escaped_parts.push(shell_escape_token(arg));

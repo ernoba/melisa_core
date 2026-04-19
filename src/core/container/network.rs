@@ -35,7 +35,7 @@ use crate::distros::host_distro::{detect_host_distro, get_distro_config, Firewal
 /// (OrbStack, VirtualBox, KVM, etc.) where `lxc-net` might be blocked by
 /// the systemd `ConditionVirtualization` guard.
 pub async fn is_virtualised_environment() -> bool {
-    // Cek via systemd-detect-virt
+    // Check via systemd-detect-virt
     let output = Command::new("systemd-detect-virt").output().await;
     let detected_by_systemd = match output {
         Ok(out) => {
@@ -49,8 +49,8 @@ pub async fn is_virtualised_environment() -> bool {
         return true;
     }
 
-    // BUG FIX #4: OrbStack menyembunyikan dirinya dari systemd-detect-virt.
-    // Fallback: deteksi lewat os-release, sama persis seperti detect_host_distro()
+    // BUG FIX #4: OrbStack hides itself from systemd-detect-virt.
+    // Fallback: detect via os-release, same as detect_host_distro()
     let os_release = tokio::fs::read_to_string("/etc/os-release")
         .await
         .unwrap_or_default()
@@ -59,7 +59,7 @@ pub async fn is_virtualised_environment() -> bool {
         return true;
     }
 
-    // Fallback lama
+    // Old fallback
     Path::new("/proc/vz").exists() || Path::new("/.dockerenv").exists()
 }
 
@@ -335,30 +335,30 @@ pub async fn setup_container_dns(name: &str, pb: &ProgressBar) {
     let etc_path = format!("{}/{}/rootfs/etc", LXC_BASE_PATH, name);
     let dns_path = format!("{}/resolv.conf", etc_path);
  
-    // Buat direktori /etc di dalam container jika belum ada
+    // Create directory /etc inside container if not present
     let _ = Command::new("sudo")
         .args(&["-n", "mkdir", "-p", &etc_path])
         .status()
         .await;
  
-    // Lepaskan immutable lock jika sebelumnya terkunci
+    // Release immutable lock if previously locked
     let _ = Command::new("sudo")
         .args(&["-n", "chattr", "-i", &dns_path])
         .status()
         .await;
  
-    // Hapus resolv.conf lama
+    // Remove old resolv.conf
     let _ = Command::new("sudo")
         .args(&["-n", "rm", "-f", &dns_path])
         .status()
         .await;
  
-    // FIX: Konten DNS sebagai bytes literal — tidak ada format string yang bisa diinjeksi
+    // FIX: DNS content as bytes literal — no format string that could be injected
     let dns_content = b"nameserver 8.8.8.8\nnameserver 8.8.4.4\n";
  
-    // FIX: Tulis via `tee` dengan stdin — argumen adalah path literal (tidak diinterpretasi shell)
-    // tee menerima path sebagai argumen argv, bukan string shell, sehingga aman
-    // meskipun dns_path mengandung karakter yang biasanya berbahaya di shell.
+    // FIX: Write via `tee` with stdin — argument is literal path (not shell-interpreted)
+    // tee receives path as argv argument, not shell string, so it's safe
+    // even if dns_path contains characters that would be dangerous in shell.
     let mut tee_process = Command::new("sudo")
         .args(&["-n", "tee", &dns_path])
         .stdin(Stdio::piped())
@@ -378,13 +378,13 @@ pub async fn setup_container_dns(name: &str, pb: &ProgressBar) {
         false
     };
  
-    // Tunggu proses tee selesai
+    // Wait for tee process to complete
     if let Some(mut child) = tee_process {
         let _ = child.wait().await;
     }
  
     if write_success {
-        // Coba pasang immutable lock (opsional — tidak fatal jika gagal di OrbStack)
+        // Try to apply immutable lock (optional — not fatal if it fails on OrbStack)
         let lock_status = Command::new("sudo")
             .args(&["-n", "chattr", "+i", &dns_path])
             .status()
@@ -413,11 +413,11 @@ pub async fn setup_container_dns(name: &str, pb: &ProgressBar) {
     }
 }
 
-/// Pastikan host bisa meneruskan paket dari container ke internet.
-/// Dipanggil SETIAP kali container dibuat atau dijalankan — bukan hanya saat lxcbr0 down.
-/// Di OrbStack, iptables rules bersifat ephemeral dan hilang setiap VM restart.
+/// Ensure host can forward packets from container to the internet.
+/// Called EVERY time a container is created or run — not just when lxcbr0 is down.
+/// On OrbStack, iptables rules are ephemeral and disappear on every VM restart.
 pub async fn ensure_nat_routing_ready() {
-    // 1. Aktifkan ip_forward agar kernel mau forward paket antar-interface
+    // 1. Enable ip_forward so kernel forwards packets between interfaces
     let _ = Command::new("sudo")
         .args(&["-n", "sysctl", "-w", "net.ipv4.ip_forward=1"])
         .stdout(Stdio::null())
@@ -425,7 +425,7 @@ pub async fn ensure_nat_routing_ready() {
         .status()
         .await;
 
-    // 2. Cek dulu apakah MASQUERADE rule sudah ada (hindari duplikat)
+    // 2. Check if MASQUERADE rule already exists (avoid duplicates)
     let check = Command::new("sudo")
         .args(&[
             "-n", "iptables", "-t", "nat", "-C", "POSTROUTING",
@@ -449,7 +449,7 @@ pub async fn ensure_nat_routing_ready() {
             .await;
     }
 
-    // 3. Izinkan FORWARD dari container keluar (cek dulu agar tidak duplikat)
+    // 3. Allow FORWARD from container outbound (check first to avoid duplicates)
     let fwd_check = Command::new("sudo")
         .args(&["-n", "iptables", "-C", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"])
         .stdout(Stdio::null())
@@ -487,36 +487,36 @@ pub async fn unlock_container_dns(name: &str) {
         .await;
 }
 
-/// Fungsi pembantu untuk mendapatkan absolute path secara cerdas.
-/// Jika folder tidak ada, akan dibuat di direktori saat ini (CWD).
+/// Helper function to get absolute path intelligently.
+/// If folder does not exist, it will be created in the current directory (CWD).
 async fn resolve_and_prepare_host_path(path_input: &str) -> Result<String, String> {
     let mut path = PathBuf::from(path_input);
 
-    // 1. Jika jalur tidak absolut, gabungkan dengan current working directory
+    // 1. If path is not absolute, combine with current working directory
     if !path.is_absolute() {
-        let cwd = std::env::current_dir().map_err(|e| format!("Gagal akses CWD: {}", e))?;
+        let cwd = std::env::current_dir().map_err(|e| format!("Failed to access CWD: {}", e))?;
         path = cwd.join(path);
     }
 
-    // 2. Cek apakah folder ada, jika tidak ada buat foldernya
+    // 2. Check if folder exists, if not create it
     if !path.exists() {
         fs::create_dir_all(&path)
             .await
-            .map_err(|e| format!("Gagal membuat folder baru: {}", e))?;
-        println!("{}[INFO]{} Folder '{}' tidak ditemukan, otomatis dibuat.", BOLD, RESET, path.display());
+            .map_err(|e| format!("Failed to create new folder: {}", e))?;
+        println!("{}[INFO]{} Folder '{}' not found, auto-created.", BOLD, RESET, path.display());
     }
 
-    // 3. Ambil jalur lengkap (canonicalize) untuk memastikan tidak ada '../' atau simbolik link
+    // 3. Get full path (canonicalize) to ensure no '../' or symlinks
     let absolute_path = fs::canonicalize(&path)
         .await
-        .map_err(|e| format!("Gagal verifikasi path: {}", e))?;
+        .map_err(|e| format!("Failed to verify path: {}", e))?;
 
     Ok(absolute_path.to_string_lossy().to_string())
 }
 
 /// Mounts a host directory into a container with smart path detection and auto-create.
 pub async fn add_shared_folder(container_name: &str, host_path_input: &str, container_path: &str) {
-    // Langkah 1: Resolusi Path (Pintar)
+    // Step 1: Resolve Path (Intelligently)
     let host_path = match resolve_and_prepare_host_path(host_path_input).await {
         Ok(p) => p,
         Err(e) => {
@@ -531,22 +531,22 @@ pub async fn add_shared_folder(container_name: &str, host_path_input: &str, cont
         host_path, container_path
     );
 
-    // Langkah 2: Idempotency (Cek apakah sudah ada agar tidak duplikat)
+    // Step 2: Idempotency (Check if already exists to avoid duplicates)
     if let Ok(content) = fs::read_to_string(&config_path).await {
         if content.contains(&bind_entry) {
-            println!("{}[INFO]{} Konfigurasi folder sudah ada. Skip.", BOLD, RESET);
+            println!("{}[INFO]{} Folder configuration already exists. Skipping.", BOLD, RESET);
             return;
         }
     }
 
-    // Langkah 3: Perbaiki Ownership (untuk unprivileged container)
+    // Step 3: Fix Ownership (for unprivileged container)
     let chown_status = Command::new("sudo")
         .args(&["chown", "-R", "100000:100000", &host_path])
         .status()
         .await;
 
     if let Err(e) = chown_status {
-        eprintln!("{}[WARNING]{} Gagal menjalankan chown: {}", YELLOW, RESET, e);
+        eprintln!("{}[WARNING]{} Failed to run chown: {}", YELLOW, RESET, e);
     }
 
     // Langkah 4: Tulis ke config
@@ -561,15 +561,15 @@ pub async fn add_shared_folder(container_name: &str, host_path_input: &str, cont
                 );
             }
         }
-        Err(err) => eprintln!("{}[ERROR]{} Tidak bisa buka config: {}", RED, RESET, err),
+        Err(err) => eprintln!("{}[ERROR]{} Could not open config: {}", RED, RESET, err),
     }
 }
 
-/// Removes a bind-mount entry dengan pencocokan yang lebih fleksibel.
+/// Removes a bind-mount entry with more flexible matching.
 pub async fn remove_shared_folder(container_name: &str, host_path_input: &str, container_path: &str) {
     let config_path = format!("{}/{}/config", LXC_BASE_PATH, container_name);
     
-    // Resolve path input dulu supaya pencocokan string di config akurat
+    // Resolve path input first so string matching in config is accurate
     let host_path = Path::new(host_path_input);
     let host_path_str = if host_path.is_absolute() {
         host_path_input.to_string()
@@ -587,10 +587,10 @@ pub async fn remove_shared_folder(container_name: &str, host_path_input: &str, c
             let mut found = false;
 
             for line in lines {
-                // Mencocokkan entri secara pintar (mengabaikan spasi berlebih)
+                // Match entry smartly (ignore excess whitespace)
                 if line.contains("lxc.mount.entry") && line.contains(&host_path_str) && line.contains(container_path) {
                     found = true;
-                    continue; // Skip baris ini (hapus)
+                    continue; // Skip this line (remove it)
                 }
                 new_lines.push(line);
             }
@@ -600,15 +600,15 @@ pub async fn remove_shared_folder(container_name: &str, host_path_input: &str, c
                 updated_content.push('\n');
 
                 if let Err(err) = fs::write(&config_path, updated_content).await {
-                    eprintln!("{}[ERROR]{} Gagal update config: {}", RED, RESET, err);
+                    eprintln!("{}[ERROR]{} Failed to update config: {}", RED, RESET, err);
                 } else {
-                    println!("{}[SUCCESS]{} Folder '{}' dihapus dari config.", GREEN, RESET, host_path_str);
+                    println!("{}[SUCCESS]{} Folder '{}' removed from config.", GREEN, RESET, host_path_str);
                 }
             } else {
-                println!("{}[INFO]{} Entri tidak ditemukan di config.", BOLD, RESET);
+                println!("{}[INFO]{} Entry not found in config.", BOLD, RESET);
             }
         }
-        Err(err) => eprintln!("{}[ERROR]{} Gagal baca config: {}", RED, RESET, err),
+        Err(err) => eprintln!("{}[ERROR]{} Failed to read config: {}", RED, RESET, err),
     }
 }
 
@@ -627,12 +627,12 @@ async fn run_sudo(args: &[&str]) -> bool {
         .unwrap_or(false)
 }
  
-/// Memeriksa apakah sebuah iptables rule sudah ada, lalu menambahkannya jika belum.
+/// Check if an iptables rule already exists, then add it if not.
 async fn ensure_iptables_rule(check_args: &[&str], add_args: &[&str]) {
-    // -C (check) mengembalikan exit code 0 jika rule sudah ada
+    // -C (check) returns exit code 0 if rule already exists
     let exists = run_sudo(check_args).await;
     if !exists {
-        // FIX: .await langsung — tidak lagi menggunakan tokio::spawn yang tidak di-await
+        // FIX: .await directly — no longer using tokio::spawn that wasn't awaited
         let added = run_sudo(add_args).await;
         if !added {
             eprintln!(
@@ -661,15 +661,15 @@ pub async fn configure_firewall_for_lxc(firewall: &FirewallKind) {
         }
  
         FirewallKind::Iptables => {
-            // FIX: Konsistensi indentasi — semua perintah rata kiri sama
-            // FIX: tokio::spawn diganti .await langsung di semua rule
+            // FIX: Consistent indentation — all commands left-aligned the same
+            // FIX: tokio::spawn replaced with direct .await in all rules
  
-            // Aktifkan IP forwarding runtime
+            // Enable IP forwarding at runtime
             run_sudo(&["-n", "sysctl", "-w", "net.ipv4.ip_forward=1"]).await;
  
-            // Persisten IP forwarding di sysctl.conf
-            // (masih menggunakan bash -c tapi argumennya adalah string tetap,
-            //  tidak ada interpolasi variabel dari user input)
+            // Persist IP forwarding in sysctl.conf
+            // (still using bash -c but arguments are constant strings,
+            //  no variable interpolation from user input)
             run_sudo(&[
                 "-n", "bash", "-c",
                 "grep -q 'net.ipv4.ip_forward' /etc/sysctl.conf \
@@ -677,19 +677,19 @@ pub async fn configure_firewall_for_lxc(firewall: &FirewallKind) {
                  || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf",
             ]).await;
  
-            // Izinkan traffic INPUT dari container
+            // Allow traffic INPUT from container
             ensure_iptables_rule(
                 &["-n", "iptables", "-C", "INPUT", "-i", "lxcbr0", "-j", "ACCEPT"],
                 &["-n", "iptables", "-I", "INPUT", "-i", "lxcbr0", "-j", "ACCEPT"],
             ).await;
  
-            // Izinkan FORWARD dari lxcbr0
+            // Allow FORWARD from lxcbr0
             ensure_iptables_rule(
                 &["-n", "iptables", "-C", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"],
                 &["-n", "iptables", "-I", "FORWARD", "-i", "lxcbr0", "-j", "ACCEPT"],
             ).await;
  
-            // Izinkan FORWARD ke lxcbr0 untuk koneksi established/related
+            // Allow FORWARD to lxcbr0 for established/related connections
             ensure_iptables_rule(
                 &[
                     "-n", "iptables", "-C", "FORWARD",
@@ -703,8 +703,8 @@ pub async fn configure_firewall_for_lxc(firewall: &FirewallKind) {
                 ],
             ).await;
  
-            // FIX: MASQUERADE — dulu menggunakan tokio::spawn tanpa .await
-            // Sekarang menggunakan ensure_iptables_rule yang di-await dengan benar
+            // FIX: MASQUERADE — previously used tokio::spawn without .await
+            // Now using ensure_iptables_rule which is properly awaited
             ensure_iptables_rule(
                 &[
                     "-n", "iptables", "-t", "nat", "-C", "POSTROUTING",

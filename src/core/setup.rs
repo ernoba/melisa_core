@@ -38,7 +38,7 @@ use crate::core::project::management::PROJECTS_MASTER_PATH;
 use crate::distros::host_distro::{detect_host_distro, get_distro_config, FirewallKind};
 
 use crate::core::user::{build_sudoers_rule, check_if_admin, UserRole};
-use crate::core::container::network::is_virtualised_environment; // Gunakan deteksi yang sudah ada
+use crate::core::container::network::is_virtualised_environment; // Use existing detection
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Runs the full host environment initialization sequence.
@@ -46,23 +46,23 @@ use crate::core::container::network::is_virtualised_environment; // Gunakan dete
 /// Detects the host Linux distribution and installs all required packages,
 /// configures networking, registers the jail shell, and hardens system privacy.
 pub async fn install_host_environment() {
-    // Logika baru yang lebih pintar
+    // Smarter logic
     if is_risky_remote_session().await {
-        // Cek apakah user memberikan flag --force-unsafe untuk bypass manual
+        // Check if user provided --force-unsafe flag to bypass manual confirmation
         let args: Vec<String> = env::args().collect();
         if !args.contains(&"--force-unsafe".to_string()) {
-            eprintln!("{}[BLOCKED]{} Sesi SSH Remote terdeteksi.", RED, RESET);
+            eprintln!("{}[BLOCKED]{} Remote SSH session detected.", RED, RESET);
             eprintln!(
-                "{}[SAFETY]{} Setup dihentikan untuk mencegah lockout firewall.",
+                "{}[SAFETY]{} Setup stopped to prevent firewall lockout.",
                 BOLD, RESET
             );
             eprintln!(
-                "{}[INFO]{} Jika Anda yakin, jalankan kembali dengan: {}melisa --setup --force-unsafe{}",
+                "{}[INFO]{} If you are sure, run again with: {}melisa --setup --force-unsafe{}",
                 YELLOW, RESET, BOLD, RESET
             );
             return;
         }
-        println!("{}[WARNING]{} Menjalankan setup pada sesi remote atas permintaan user.", YELLOW, RESET);
+        println!("{}[WARNING]{} Running setup on remote session at user request.", YELLOW, RESET);
     }
 
     let host_distro = detect_host_distro().await;
@@ -91,7 +91,7 @@ pub async fn install_host_environment() {
         if !username.is_empty() {
             setup_lxc_user_subid_mapping(&username).await;
             
-            // Panggil helper khusus setup untuk mengatur privileges
+            // Call setup-specific helper to configure privileges
             setup_host_user_admin_privileges(&username).await;
         }
     }
@@ -290,29 +290,29 @@ async fn copy_binary_to_system() {
 
 // SSH session detection with smart IP filtering to allow localhost SSH but block remote sessions without console access.
 async fn is_risky_remote_session() -> bool {
-    // 1. Cek apakah ini lingkungan OrbStack atau VM Lokal.
-    // Jika iya, setup selalu aman karena operator memiliki akses konsol fisik melalui Host.
+    // 1. Check if this is OrbStack or Local VM environment.
+    // If yes, setup is always safe because operator has physical console access via Host.
     if is_virtualised_environment().await {
         return false; 
     }
 
-    // 2. Jika variabel SSH tidak ada, berarti sesi lokal (Aman).
+    // 2. If SSH variable is not set, it's a local session (Safe).
     let ssh_conn = match env::var("SSH_CONNECTION") {
         Ok(val) => val,
         Err(_) => return false,
     };
 
-    // 3. Analisis IP Asal (Smart IP Filtering).
-    // SSH_CONNECTION formatnya: "IP_CLIENT PORT_CLIENT IP_SERVER PORT_SERVER"
+    // 3. Analyze source IP (Smart IP Filtering).
+    // SSH_CONNECTION format: "IP_CLIENT PORT_CLIENT IP_SERVER PORT_SERVER"
     let parts: Vec<&str> = ssh_conn.split_whitespace().collect();
     if let Some(client_ip) = parts.get(0) {
-        // Jika koneksi berasal dari localhost (127.0.0.1 atau ::1), ini aman.
+        // If connection is from localhost (127.0.0.1 or ::1), it's safe.
         if *client_ip == "127.0.0.1" || *client_ip == "::1" || *client_ip == "localhost" {
             return false;
         }
     }
 
-    // 4. Jika sampai sini dan SSH_CONNECTION ada, berarti ini benar-benar sesi remote.
+    // 4. If we reach here and SSH_CONNECTION exists, this is a true remote session.
     true
 }
 
@@ -581,7 +581,7 @@ async fn setup_host_user_admin_privileges(username: &str) {
         BOLD, username, RESET
     );
 
-    // Cek apakah user sudah memiliki akses admin
+    // Check if user already has admin access.
     if check_if_admin(username).await {
         println!(
             "  {:<50} [ {}SKIPPED{} ]",
@@ -593,7 +593,7 @@ async fn setup_host_user_admin_privileges(username: &str) {
     let sudoers_rule = build_sudoers_rule(username, &UserRole::Admin);
     let sudoers_path = format!("/etc/sudoers.d/melisa_{}", username);
 
-    // Tulis aturan sudoers langsung menggunakan file system as root
+    // Write sudoers rule directly using file system as root
     match OpenOptions::new()
         .create(true)
         .write(true)
@@ -608,7 +608,7 @@ async fn setup_host_user_admin_privileges(username: &str) {
                     "Deploying admin sudoers rule", RED, RESET, err
                 );
             } else {
-                // Set permission ke 0440 wajib untuk file sudoers
+                // Set permissions to 0440 (required for sudoers files)
                 execute_silent_task(
                     "chmod",
                     &["0440", &sudoers_path],

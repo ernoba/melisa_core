@@ -156,37 +156,37 @@ pub async fn upload_to_container(container_name: &str, dest_path: &str) {
     use crate::core::container::types::LXC_BASE_PATH;
     use crate::cli::color::{GREEN, RED, RESET};
  
-    // Validasi dest_path dengan filter yang sama seperti client
-    // Tolak karakter berbahaya secara eksplisit
+    // Validate dest_path with same filter as client.
+    // Explicitly reject dangerous characters.
     let forbidden_in_path: &[char] = &['\0', '\n', '\r', ';', '&', '|', '$', '`', '>', '<'];
     for ch in forbidden_in_path {
         if dest_path.contains(*ch) {
             eprintln!(
-                "{}[ERROR]{} Destination path mengandung karakter terlarang: {:?}",
+                "{}[ERROR]{} Destination path contains forbidden character: {:?}",
                 RED, RESET, ch
             );
             return;
         }
     }
  
-    // Pastikan dest_path adalah path absolut (mulai dengan /)
-    // untuk mencegah interpretasi ambigu
+    // Ensure dest_path is an absolute path (starts with /)
+    // to prevent ambiguous interpretation.
     if !dest_path.starts_with('/') {
         eprintln!(
-            "{}[ERROR]{} Destination path harus absolut (diawali dengan '/').",
+            "{}[ERROR]{} Destination path must be absolute (starts with '/').",
             RED, RESET
         );
         return;
     }
  
-    // Langkah 1: Buat direktori tujuan dengan perintah terpisah (tanpa shell)
+    // Step 1: Create destination directory with separate command (no shell).
     let mkdir_status = Command::new("sudo")
         .args(&[
             "lxc-attach",
             "-P", LXC_BASE_PATH,
             "-n", container_name,
             "--",
-            "mkdir", "-p", dest_path,  // dest_path sebagai argumen, bukan string shell
+            "mkdir", "-p", dest_path,  // dest_path as argument, not shell string
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -195,13 +195,13 @@ pub async fn upload_to_container(container_name: &str, dest_path: &str) {
  
     if !mkdir_status.map(|s| s.success()).unwrap_or(false) {
         eprintln!(
-            "{}[ERROR]{} Gagal membuat direktori '{}' di container.",
+            "{}[ERROR]{} Failed to create directory '{}' in container.",
             RED, RESET, dest_path
         );
         return;
     }
  
-    // Langkah 2: Ekstrak tar dari stdin ke direktori tujuan (tanpa shell)
+    // Step 2: Extract tar from stdin to destination directory (no shell).
     let status = Command::new("sudo")
         .args(&[
             "lxc-attach",

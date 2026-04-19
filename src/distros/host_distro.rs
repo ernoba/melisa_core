@@ -5,13 +5,19 @@
 //
 // Detects the host OS by reading `/etc/os-release` and maps it to the
 // correct package manager, LXC package names, and firewall tool.
+//
+// NOTE: This module now uses the trait-based DistroRegistry for definitions.
 // ============================================================================
 
 use tokio::fs;
+use crate::distros::abstraction::DistroConfig;
+use crate::distros::registry::DistroRegistry;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// Supported Linux distribution families.
+/// NOTE: This enum is kept for backward compatibility.
+/// New code should prefer using DistroRegistry for more flexibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostDistro {
     /// Debian / Ubuntu / Linux Mint and derivatives.
@@ -30,29 +36,8 @@ pub enum HostDistro {
     Unknown,
 }
 
-/// Firewall management tool available on the host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FirewallKind {
-    /// `firewalld` — used on Fedora/RHEL systems.
-    Firewalld,
-    /// `ufw` — used on Debian/Ubuntu systems.
-    Ufw,
-    /// Raw `iptables` — fallback for minimal systems.
-    Iptables,
-}
-
-/// Per-distribution configuration used by the setup routine.
-#[derive(Debug, Clone)]
-pub struct DistroConfig {
-    /// Human-readable name for display.
-    pub name: String,
-    /// System package manager executable name.
-    pub pkg_manager: String,
-    /// Package names required to install LXC on this distro.
-    pub lxc_packages: Vec<String>,
-    /// Firewall management tool available on this distro.
-    pub firewall_tool: FirewallKind,
-}
+// Re-export firewall types from abstraction for backward compatibility
+pub use crate::distros::abstraction::FirewallKind;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -82,67 +67,35 @@ pub async fn detect_host_distro() -> HostDistro {
 
 /// Returns the [`DistroConfig`] for the detected host distribution.
 ///
+/// This function now uses the trait-based registry internally.
 /// # Arguments
 /// * `distro` - The detected [`HostDistro`] variant.
 pub fn get_distro_config(distro: &HostDistro) -> DistroConfig {
-    match distro {
-        HostDistro::Debian => DistroConfig {
-            name: "Debian / Ubuntu".into(),
-            pkg_manager: "apt-get".into(),
-            lxc_packages: vec![
-                "lxc".into(), "lxc-templates".into(), "uidmap".into(),
-                "bridge-utils".into(), "dnsmasq".into(),
-            ],
-            firewall_tool: FirewallKind::Ufw,
-        },
-        HostDistro::Fedora => DistroConfig {
-            name: "Fedora / RHEL".into(),
-            pkg_manager: "dnf".into(),
-            lxc_packages: vec![
-                "lxc".into(), "lxc-templates".into(), "lxc-extra".into(),
-                "dnsmasq".into(),
-            ],
-            firewall_tool: FirewallKind::Firewalld,
-        },
-        HostDistro::Arch => DistroConfig {
-            name: "Arch Linux".into(),
-            pkg_manager: "pacman".into(),
-            lxc_packages: vec!["lxc".into(), "bridge-utils".into()],
-            firewall_tool: FirewallKind::Iptables,
-        },
-        HostDistro::Alpine => DistroConfig {
-            name: "Alpine Linux".into(),
-            pkg_manager: "apk".into(),
-            lxc_packages: vec!["lxc".into(), "lxc-templates".into()],
-            firewall_tool: FirewallKind::Iptables,
-        },
-        HostDistro::Suse => DistroConfig {
-            name: "openSUSE".into(),
-            pkg_manager: "zypper".into(),
-            lxc_packages: vec!["lxc".into(), "lxc-templates".into(), "bridge-utils".into()],
-            firewall_tool: FirewallKind::Firewalld,
-        },
-        HostDistro::OrbStack => DistroConfig {
-            name: "OrbStack Virtual Machine".into(),
-            pkg_manager: "apt-get".into(),
-            lxc_packages: vec![
-                "lxc".into(), 
-                "bridge-utils".into(), 
-                "dnsmasq".into(), 
-                "ufw".into(), 
-                "iptables".into(), 
-                "uidmap".into(), 
-                "openssh-server".into()
-            ],
-            firewall_tool: FirewallKind::Iptables, // Tetap gunakan Iptables untuk OrbStack
-        },
-        HostDistro::Unknown => DistroConfig {
-            name: "Unknown / Generic".into(),
-            pkg_manager: "apt-get".into(),
-            lxc_packages: vec!["lxc".into(), "lxc-templates".into()],
-            firewall_tool: FirewallKind::Iptables,
-        },
-    }
+    let registry = DistroRegistry::new();
+    
+    // Map enum to registry lookup
+    let id = match distro {
+        HostDistro::Debian => "debian",
+        HostDistro::Fedora => "fedora",
+        HostDistro::Arch => "arch",
+        HostDistro::Alpine => "alpine",
+        HostDistro::Suse => "suse",
+        HostDistro::OrbStack => "orbstack",
+        HostDistro::Unknown => "unknown",
+    };
+    
+    registry.get_host_distro(id).unwrap_or_else(|| {
+        // Fallback to unknown distro config
+        registry.get_host_distro("unknown")
+            .expect("Unknown distro should always be available")
+    })
+}
+
+/// Get distro config directly from registry using ID string
+/// This is a new convenience function for registry-based code
+pub fn get_distro_config_by_id(id: &str) -> Option<DistroConfig> {
+    let registry = DistroRegistry::new();
+    registry.get_host_distro(id)
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -319,14 +272,14 @@ mod orbstack_tests {
 
     #[test]
     fn test_classify_distro_detects_orbstack() {
-        // Simulasi string ID dari /etc/os-release OrbStack
+        // Simulate ID string from OrbStack /etc/os-release
         let orb_id = "orbstack";
         let result = classify_distro(orb_id);
         
         assert_eq!(
             result, 
             HostDistro::OrbStack, 
-            "Harus mendeteksi 'orbstack' sebagai HostDistro::OrbStack"
+            "Must detect 'orbstack' as HostDistro::OrbStack"
         );
     }
 
@@ -337,13 +290,13 @@ mod orbstack_tests {
         assert_eq!(config.pkg_manager, "apt-get");
         assert_eq!(config.firewall_tool, FirewallKind::Iptables);
         
-        // Memastikan minimal ada 3 paket dasar yang didefinisikan saat ini
+        // Ensure at least 3 basic packages are defined
         assert!(
             config.lxc_packages.len() >= 3, 
-            "OrbStack minimal harus memiliki paket lxc, lxc-templates, dan uidmap"
+            "OrbStack must have at least lxc, lxc-templates, and uidmap packages"
         );
         
-        // Verifikasi nama tampilan
+        // Verify display name
         assert!(config.name.contains("OrbStack"));
     }
 }

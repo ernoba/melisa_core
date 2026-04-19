@@ -10,10 +10,10 @@
 // which is then renamed into place.  This prevents partial reads if the
 // process is interrupted mid-write.
 //
-// FIX: `write_container_metadata` ada tapi tidak pernah dipanggil di versi baru.
-//      `lifecycle.rs` sekarang memanggil fungsi ini setelah container dibuat
-//      agar `melisa --info` bisa menampilkan informasi container.
-//      Fungsi ini sudah `pub` — pastikan tetap demikian.
+// FIX: `write_container_metadata` exists but is never called in new version.
+//      `lifecycle.rs` now calls this function after container is created
+//      so that `melisa --info` can display container information.
+//      This function is already `pub` — ensure it stays that way.
 // ============================================================================
 
 use std::path::PathBuf;
@@ -76,13 +76,13 @@ pub async fn inspect_container_metadata(container_name: &str) -> Result<String, 
 
 /// Atomically writes metadata for a container.
 ///
-/// Dipanggil oleh `lifecycle.rs::create_container` setelah container berhasil
-/// dibuat, agar `melisa --info` bisa menampilkan informasi container.
+/// Called by `lifecycle.rs::create_container` after container is successfully
+/// created, so that `melisa --info` can display container information.
 ///
-/// Cara kerja:
-/// 1. Tulis konten ke file `.tmp` terlebih dahulu
-/// 2. Rename atomik ke path final
-/// Jika write gagal di tengah jalan, file original tidak terkorupsi.
+/// How it works:
+/// 1. Write content to `.tmp` file first
+/// 2. Atomic rename to final path
+/// If write fails mid-way, original file is not corrupted.
 ///
 /// # Arguments
 /// * `container_name` - The LXC container name.

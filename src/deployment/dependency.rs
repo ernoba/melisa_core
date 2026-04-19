@@ -15,6 +15,20 @@ use crate::cli::color::{BOLD, GREEN, RED, RESET, YELLOW};
 use crate::core::container::types::LXC_BASE_PATH;
 use crate::deployment::manifest::types::DependencySection;
 
+// ── Shell escaping helper ────────────────────────────────────────────────────
+
+/// Safely escapes a string for use in a shell command.
+/// Wraps the string in single quotes and escapes any single quotes within it.
+///
+/// # Arguments
+/// * `s` - String to escape.
+///
+/// # Returns
+/// Shell-escaped string.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace("'", "'\\''"))
+}
+
 // ── Container command execution ───────────────────────────────────────────────
 
 /// Executes a shell command inside the specified container, inheriting output.
@@ -68,6 +82,7 @@ pub async fn lxc_exec_silent(container: &str, shell_cmd: &str) -> bool {
 /// Probes the container to detect its system package manager.
 ///
 /// Checks for each known package manager in order; returns the first one found.
+/// Order matters: dnf is checked before yum, and apt-get has highest priority.
 ///
 /// # Arguments
 /// * `container` - Target container name.
@@ -75,7 +90,9 @@ pub async fn lxc_exec_silent(container: &str, shell_cmd: &str) -> bool {
 /// # Returns
 /// `Some(pm_name)` if a supported package manager was found, `None` otherwise.
 pub async fn detect_package_manager(container: &str) -> Option<String> {
-    for pm in &["apt-get", "pacman", "dnf", "apk", "zypper"] {
+    // Order: apt (most common), pacman (arch), dnf (modern fedora), yum (legacy rhel),
+    // apk (alpine), zypper (suse). dnf is checked before yum for consistency.
+    for pm in &["apt-get", "pacman", "dnf", "yum", "apk", "zypper"] {
         if lxc_exec_silent(container, &format!("which {}", pm)).await {
             return Some(pm.to_string());
         }
@@ -172,7 +189,7 @@ pub async fn install_lang_deps(container: &str, deps: &DependencySection) -> boo
             "{}[DEPLOY]{} Installing {} pip package(s)…{}",
             BOLD, RESET, deps.pip.len(), RESET
         );
-        let pkgs = deps.pip.join(" ");
+        let pkgs = deps.pip.iter().map(|p| shell_escape(p)).collect::<Vec<_>>().join(" ");
         let cmd = format!("pip3 install --break-system-packages {}", pkgs);
         if lxc_exec(container, &cmd).await {
             println!("{}[OK]{} pip packages installed.", GREEN, RESET);
@@ -188,27 +205,51 @@ pub async fn install_lang_deps(container: &str, deps: &DependencySection) -> boo
             "{}[DEPLOY]{} Installing {} npm package(s) globally…{}",
             BOLD, RESET, deps.npm.len(), RESET
         );
-        let pkgs = deps.npm.join(" ");
-        let cmd = format!("npm install -g {}", pkgs);
+        let pkgs = deps.npm.iter().map(|p| shell_escape(p)).collect::<Vec<_>>().join(" ");
+        // Try with -g first, but provide diagnostic output if it fails
+        // Global npm install in containers can have permission issues
+        let cmd = format!("npm install -g {} 2>&1", pkgs);
         if lxc_exec(container, &cmd).await {
             println!("{}[OK]{} npm packages installed.", GREEN, RESET);
         } else {
-            println!("{}[ERROR]{} npm install failed.", RED, RESET);
-            all_succeeded = false;
+            eprintln!(
+                "{}[WARNING]{} npm global install failed. Check npm permissions in container.",
+                YELLOW, RESET
+            );
+            // Don't fail deployment for npm - it's often best-effort in containers
+            println!(
+                "{}[INFO]{} Continuing deployment despite npm installation issues.",
+                YELLOW, RESET
+            );
         }
     }
 
     // ── cargo ─────────────────────────────────────────────────────────────────
+    let mut cargo_failed_crates = Vec::new();
     for crate_name in &deps.cargo {
         println!(
             "{}[DEPLOY]{} cargo install '{}'…{}",
             BOLD, RESET, crate_name, RESET
         );
-        let cmd = format!("cargo install {}", crate_name);
-        if !lxc_exec(container, &cmd).await {
+        let escaped_name = shell_escape(crate_name);
+        let cmd = format!("cargo install {}", escaped_name);
+        if lxc_exec(container, &cmd).await {
+            println!("{}[OK]{} cargo crate '{}' installed.", GREEN, RESET, crate_name);
+        } else {
             println!("{}[ERROR]{} cargo install '{}' failed.", RED, RESET, crate_name);
+            cargo_failed_crates.push(crate_name.clone());
             all_succeeded = false;
         }
+    }
+    
+    // Provide summary of failed cargo installs for debugging
+    if !cargo_failed_crates.is_empty() {
+        eprintln!(
+            "{}[WARNING]{} Failed to install {} cargo crate(s): {}",
+            YELLOW, RESET,
+            cargo_failed_crates.len(),
+            cargo_failed_crates.join(", ")
+        );
     }
 
     // ── gem ───────────────────────────────────────────────────────────────────
@@ -217,7 +258,7 @@ pub async fn install_lang_deps(container: &str, deps: &DependencySection) -> boo
             "{}[DEPLOY]{} Installing {} gem package(s)…{}",
             BOLD, RESET, deps.gem.len(), RESET
         );
-        let pkgs = deps.gem.join(" ");
+        let pkgs = deps.gem.iter().map(|p| shell_escape(p)).collect::<Vec<_>>().join(" ");
         let cmd = format!("gem install {}", pkgs);
         if lxc_exec(container, &cmd).await {
             println!("{}[OK]{} gem packages installed.", GREEN, RESET);
@@ -233,7 +274,7 @@ pub async fn install_lang_deps(container: &str, deps: &DependencySection) -> boo
             "{}[DEPLOY]{} Installing {} composer package(s)…{}",
             BOLD, RESET, deps.composer.len(), RESET
         );
-        let pkgs = deps.composer.join(" ");
+        let pkgs = deps.composer.iter().map(|p| shell_escape(p)).collect::<Vec<_>>().join(" ");
         let cmd = format!("composer global require {}", pkgs);
         if lxc_exec(container, &cmd).await {
             println!("{}[OK]{} composer packages installed.", GREEN, RESET);
@@ -250,6 +291,10 @@ pub async fn install_lang_deps(container: &str, deps: &DependencySection) -> boo
 
 /// Builds the package index update command for the given package manager.
 ///
+/// Handles both modern (dnf) and legacy (yum) RedHat-based systems.
+/// Note: yum may not support check-update on very old versions, so we use
+/// makecache as a safe middle ground.
+///
 /// # Arguments
 /// * `pkg_manager` - Package manager name.
 ///
@@ -260,7 +305,10 @@ pub fn build_update_cmd(pkg_manager: &str) -> String {
         "pacman"       => "pacman -Sy --noconfirm".into(),
         "apk"          => "apk update".into(),
         "zypper"       => "zypper --non-interactive refresh".into(),
-        "dnf" | "yum"  => "dnf makecache".into(),
+        // For dnf and yum: use check-update if available (non-fatal on failure)
+        // Fallback gracefully since update is best-effort
+        "dnf"          => "dnf check-update || true".into(),
+        "yum"          => "yum check-update || true".into(),
         _              => "apt-get update -y".into(),
     }
 }
@@ -279,7 +327,8 @@ pub fn build_system_install_cmd(pkg_manager: &str, deps: &DependencySection) -> 
     let packages: &Vec<String> = match pkg_manager {
         "apt-get" | "apt" => &deps.apt,
         "pacman"          => &deps.pacman,
-        "dnf" | "yum"     => &deps.dnf,
+        "dnf"             => &deps.dnf,
+        "yum"             => &deps.dnf, // yum uses same dnf package list
         "apk"             => &deps.apk,
         "zypper"          => &deps.zypper,
         _                 => return None,
@@ -289,12 +338,15 @@ pub fn build_system_install_cmd(pkg_manager: &str, deps: &DependencySection) -> 
         return None;
     }
 
-    let pkg_list = packages.join(" ");
+    let pkg_list = packages.iter().map(|p| shell_escape(p)).collect::<Vec<_>>().join(" ");
     let cmd = match pkg_manager {
         "pacman"      => format!("pacman -S --noconfirm {}", pkg_list),
+        // apk add --no-cache is preferred for minimal images but may not always work
         "apk"         => format!("apk add {}", pkg_list),
         "zypper"      => format!("zypper --non-interactive install {}", pkg_list),
-        "dnf" | "yum" => format!("dnf install -y {}", pkg_list),
+        // dnf supports -y flag reliably; yum is legacy but mostly compatible
+        "dnf"         => format!("dnf install -y {}", pkg_list),
+        "yum"         => format!("yum install -y {}", pkg_list),
         _             => format!("apt-get install -y {}", pkg_list),
     };
     Some(cmd)
@@ -346,12 +398,22 @@ mod tests {
     }
 
     #[test]
-    fn test_build_update_cmd_dnf_produces_dnf_makecache() {
+    fn test_build_update_cmd_dnf_produces_check_update() {
         let cmd = build_update_cmd("dnf");
         assert!(cmd.contains("dnf"), "Update command must use dnf");
         assert!(
-            cmd.contains("makecache") || cmd.contains("update"),
-            "dnf update command must use makecache or update"
+            cmd.contains("check-update"),
+            "dnf update command must use check-update with fallback"
+        );
+    }
+
+    #[test]
+    fn test_build_update_cmd_yum_produces_check_update() {
+        let cmd = build_update_cmd("yum");
+        assert!(cmd.contains("yum"), "Update command must use yum");
+        assert!(
+            cmd.contains("check-update"),
+            "yum update command must use check-update with fallback"
         );
     }
 
@@ -409,6 +471,25 @@ mod tests {
     }
 
     #[test]
+    fn test_build_system_install_cmd_yum_uses_install_y() {
+        let mut deps = DependencySection::default();
+        deps.dnf = vec!["curl".into(), "git".into()];
+        let cmd = build_system_install_cmd("yum", &deps).unwrap();
+        assert!(cmd.contains("yum install -y"), "yum install must use 'yum install -y'");
+        assert!(cmd.contains("curl"));
+        assert!(cmd.contains("git"));
+    }
+
+    #[test]
+    fn test_build_system_install_cmd_dnf_uses_install_y() {
+        let mut deps = DependencySection::default();
+        deps.dnf = vec!["curl".into(), "git".into()];
+        let cmd = build_system_install_cmd("dnf", &deps).unwrap();
+        assert!(cmd.contains("dnf install -y"), "dnf install must use 'dnf install -y'");
+        assert!(cmd.contains("curl"));
+        assert!(cmd.contains("git"));
+    }
+    #[test]
     fn test_build_system_install_cmd_unknown_pm_returns_none() {
         let mut deps = DependencySection::default();
         deps.apt = vec!["curl".into()];
@@ -418,7 +499,6 @@ mod tests {
             "Unknown package manager must return None instead of crashing"
         );
     }
-
     // ── has_lang_deps ────────────────────────────────────────────────────────
 
     #[test]

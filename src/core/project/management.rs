@@ -2,12 +2,12 @@
 // PATCH: src/core/project/management.rs
 // ============================================================
 //
-// RINGKASAN PERUBAHAN:
-//  1. Tambah validate_project_name() — validasi sebelum operasi apapun.
-//  2. Tambah validate_server_username() — validasi username di semua fungsi.
-//  3. create_new_project — ubah permission dari 1777 → 2770 (group-sticky).
-//  4. Semua fungsi yang membangun path /home/{user}/{project} sekarang
-//     memanggil validasi terlebih dahulu.
+// SUMMARY OF CHANGES:
+//  1. Add validate_project_name() — validate before any operations.
+//  2. Add validate_server_username() — validate username in all functions.
+//  3. create_new_project — change permissions from 1777 → 2770 (group-sticky).
+//  4. All functions building /home/{user}/{project} paths now
+//     call validation first.
 // ============================================================
 
 use std::process::Stdio;
@@ -17,38 +17,38 @@ use crate::cli::color::{BOLD, GREEN, RED, RESET, YELLOW};
 
 pub const PROJECTS_MASTER_PATH: &str = "/var/melisa/projects";
 
-// ── FIX #1: Validasi nama project ────────────────────────────────────────────
+// ── FIX #1: Project name validation ──────────────────────────────────────────
 //
-// Hanya izinkan: huruf, angka, hyphen, underscore.
-// Panjang: 1–64 karakter.
-// Tidak boleh dimulai dengan '-'.
+// Allow only: letters, digits, hyphen, underscore.
+// Length: 1–64 characters.
+// Must not start with '-'.
 //
 pub fn validate_project_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 64 {
         return Err(format!(
-            "Nama project '{}' harus antara 1–64 karakter.", name
+            "Project name '{}' must be between 1–64 characters.", name
         ));
     }
     if name.starts_with('-') {
-        return Err(format!("Nama project '{}' tidak boleh dimulai dengan '-'.", name));
+        return Err(format!("Project name '{}' must not start with '-'.", name));
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(format!(
-            "Nama project '{}' hanya boleh mengandung huruf, angka, '-', dan '_'. \
-             Spasi dan karakter khusus tidak diizinkan.", name
+            "Project name '{}' can only contain letters, digits, '-', and '_'. \
+             Spaces and special characters are not allowed.", name
         ));
     }
-    // Cegah path traversal eksplisit (defense in depth)
+    // Prevent explicit path traversal (defense in depth).
     if name.contains("..") {
-        return Err(format!("Nama project '{}' mengandung path traversal sequence.", name));
+        return Err(format!("Project name '{}' contains path traversal sequence.", name));
     }
     Ok(())
 }
 
-// ── FIX #2: Validasi username server-side ────────────────────────────────────
+// ── FIX #2: Server-side username validation ──────────────────────────────────
 //
-// Username yang masuk lewat CLI atau invitation harus memenuhi aturan POSIX.
-// Ini mencegah path traversal via /home/../etc/passwd dan command injection.
+// Usernames from CLI or invitations must follow POSIX rules.
+// This prevents path traversal via /home/../etc/passwd and command injection.
 //
 pub fn validate_server_username(username: &str) -> Result<(), String> {
     if username.is_empty() || username.len() > 32 {
@@ -69,7 +69,7 @@ pub fn validate_server_username(username: &str) -> Result<(), String> {
 }
 
 pub async fn create_new_project(project_name: &str, audit: bool) {
-    // ── FIX: Validasi nama project sebelum operasi apapun ────────────────
+    // ── FIX: Validate project name before any operations ──────────────────
     if let Err(e) = validate_project_name(project_name) {
         eprintln!("{}[ERROR]{} {}", RED, RESET, e);
         return;
@@ -97,17 +97,17 @@ pub async fn create_new_project(project_name: &str, audit: bool) {
         }
     }
 
-    // ── FIX #3: Ubah permission 1777 → 2770 (setgid + group-writable) ────
+    // ── FIX #3: Change permissions from 1777 → 2770 (setgid + group-writable) ─
     //
-    // SEBELUMNYA: chmod 1777 → world-writable, siapa pun bisa menulis ke repo.
+    // BEFORE: chmod 1777 → world-writable, anyone can write to repo.
     //
-    // SESUDAHNYA: chmod 2770 → hanya owner dan group yang bisa baca/tulis.
-    //   - '2' = setgid bit: file baru otomatis mewarisi group direktori ini.
-    //   - '7' untuk owner  : rwx
-    //   - '7' untuk group  : rwx
-    //   - '0' untuk others : ---
+    // AFTER: chmod 2770 → only owner and group can read/write.
+    //   - '2' = setgid bit: new files automatically inherit directory group.
+    //   - '7' for owner  : rwx
+    //   - '7' for group  : rwx
+    //   - '0' for others : ---
     //
-    // Tambahkan juga: chown root:melisa-projects agar akses hanya via group.
+    // Also add: chown root:melisa-projects so access is only via group.
     //
     let _ = Command::new("sudo")
         .args(&["chmod", "2770", &master_path])

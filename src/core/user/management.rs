@@ -278,9 +278,9 @@ pub async fn list_melisa_users() {
             if crate::core::project::management::validate_server_username(&u).is_err() {
                 continue;
             }
-            // Verifikasi user benar-benar ada di sistem
+            // Verify user actually exists in the system
             if Command::new("id").arg(&u).status().await.map_or(false, |s| s.success()) {
-                // FIX: cek duplikasi sebelum push (tidak push dua kali)
+                // FIX: check for duplicates before push (don't push twice)
                 if !existing_usernames.contains(&u) {
                     existing_usernames.push(u);
                 }
@@ -457,14 +457,14 @@ pub async fn clean_orphaned_sudoers() {
     }
 
     // 2. Tambahkan SEMUA user yang punya file di /etc/sudoers.d/melisa_*
-    // Ini menjamin user host seperti 'saferoom' tidak dianggap orphan
+    // This ensures host users like 'saferoom' are not considered orphan
     let files = Command::new("ls").arg("/etc/sudoers.d/").output().await;
     if let Ok(out) = files {
         let list = String::from_utf8_lossy(&out.stdout);
         for line in list.lines() {
             if line.starts_with("melisa_") {
                 let u = line.trim_start_matches("melisa_");
-                // Cek apakah user benar-benar ada di sistem OS
+                // Check if user actually exists in the OS
                 if Command::new("id").arg(u).status().await.map_or(false, |s| s.success()) {
                     if !existing_usernames.contains(&u.to_string()) {
                         existing_usernames.push(u.to_string());

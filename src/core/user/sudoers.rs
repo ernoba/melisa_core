@@ -3,13 +3,13 @@
 // PATCH: src/core/user/sudoers.rs
 // ============================================================
 //
-// RINGKASAN PERUBAHAN:
-//  1. configure_sudoers    — Perbaiki TOCTOU race condition:
-//                            tulis ke temp file di direktori aman (/tmp),
-//                            validasi dengan visudo, lalu mv atomik.
-//  2. check_if_admin       — Ganti deteksi berbasis string "useradd" yang
-//                            rapuh dengan pemeriksaan role yang lebih ketat.
-//  3. remove_orphaned_sudoers_files — Ganti `ls` dengan tokio::fs::read_dir.
+// SUMMARY OF CHANGES:
+//  1. configure_sudoers    — Fix TOCTOU race condition:
+//                            write to temp file in safe directory (/tmp),
+//                            validate with visudo, then atomic move.
+//  2. check_if_admin       — Replace fragile string-based "useradd" detection
+//                            with stricter role checking.
+//  3. remove_orphaned_sudoers_files — Replace `ls` with tokio::fs::read_dir.
 // ============================================================
  
 use std::process::Stdio;
@@ -96,7 +96,7 @@ pub fn sudoers_file_path(username: &str) -> String {
     format!("{}/{}{}", SUDOERS_DIR, SUDOERS_FILE_PREFIX, username)
 }
  
-// ── FIX #1: configure_sudoers — Perbaiki TOCTOU race condition ───────────────
+// ── FIX #1: configure_sudoers — Fix TOCTOU race condition ────────────────────
 pub async fn configure_sudoers(username: &str, role: UserRole, audit: bool) {
     let sudoers_rule = build_sudoers_rule(username, &role);
     if sudoers_rule.is_empty() {
@@ -109,8 +109,8 @@ pub async fn configure_sudoers(username: &str, role: UserRole, audit: bool) {
  
     let sudoers_path = sudoers_file_path(username);
  
-    // FIX: Gunakan temp file di /tmp dengan nama yang unik
-    // Ini memisahkan temp file dari direktori sudoers.d yang privilege-sensitive
+    // FIX: Use temp file in /tmp with unique name.
+    // This separates temp file from privilege-sensitive sudoers.d directory.
     let temp_path = format!("/tmp/melisa_sudoers_{}.tmp", username);
  
     if audit {
@@ -118,7 +118,7 @@ pub async fn configure_sudoers(username: &str, role: UserRole, audit: bool) {
         println!("{}", sudoers_rule.trim());
     }
  
-    // Tulis ke temp file di /tmp
+    // Write to temp file in /tmp
     let tee_process = Command::new("sudo")
         .args(&["tee", &temp_path])
         .stdin(Stdio::piped())
@@ -148,13 +148,13 @@ pub async fn configure_sudoers(username: &str, role: UserRole, audit: bool) {
         }
     }
  
-    // FIX: Set permission ketat SEBELUM validasi — bukan sesudah
+    // FIX: Set strict permissions BEFORE validation — not after.
     let _ = Command::new("sudo")
         .args(&["chmod", "0400", &temp_path])
         .status()
         .await;
  
-    // Validasi dengan visudo
+    // Validate with visudo.
     let visudo_check = Command::new("sudo")
         .args(&["visudo", "-c", "-f", &temp_path])
         .stdout(Stdio::null())
@@ -164,17 +164,17 @@ pub async fn configure_sudoers(username: &str, role: UserRole, audit: bool) {
  
     match visudo_check {
         Ok(s) if s.success() => {
-            // FIX: mv dari /tmp ke /etc/sudoers.d — ini atomik di filesystem yang sama
-            // jika /tmp dan /etc ada di partisi yang sama. Jika berbeda partisi,
-            // cp + rm tetap lebih aman dari pendekatan sebelumnya karena temp
-            // file ada di /tmp yang tidak di-scan oleh sudo daemon.
+            // FIX: Move from /tmp to /etc/sudoers.d — this is atomic on same filesystem
+            // if /tmp and /etc are on the same partition. If different partitions,
+            // cp + rm is still safer than previous approach because temp
+            // file is in /tmp which is not scanned by sudo daemon.
             let mv_status = Command::new("sudo")
                 .args(&["mv", &temp_path, &sudoers_path])
                 .status()
                 .await;
  
             if mv_status.map(|s| s.success()).unwrap_or(false) {
-                // Pastikan permission final benar setelah mv
+                // Ensure final permissions are correct after move.
                 let _ = Command::new("sudo")
                     .args(&["chmod", "0440", &sudoers_path])
                     .status()
@@ -208,17 +208,17 @@ pub async fn configure_sudoers(username: &str, role: UserRole, audit: bool) {
     }
 }
  
-// ── FIX #2: check_if_admin — Deteksi role yang lebih ketat ───────────────────
+// ── FIX #2: check_if_admin — Stricter role detection ──────────────────────────
 //
-// SEBELUMNYA (RAPUH):
+// BEFORE (FRAGILE):
 //   content.contains("useradd")
-//   → Siapapun yang bisa menambahkan string "useradd" ke file sudoers-nya
-//     bisa lolos sebagai admin.
+//   → Anyone who can add the string "useradd" to their sudoers file
+//     can pass as admin.
 //
-// SESUDAHNYA (LEBIH KUAT):
-//   Periksa apakah file sudoers mengandung baris admin_only yang spesifik
-//   DAN berformat benar (/usr/sbin/useradd *).
-//   Ini jauh lebih sulit di-forge karena harus match pola exact.
+// AFTER (STRONGER):
+//   Check if sudoers file contains specific admin_only lines
+//   AND is formatted correctly (/usr/sbin/useradd *).
+//   This is much harder to forge because it must match exact pattern.
 //
 pub async fn check_if_admin(username: &str) -> bool {
     let sudoers_path = sudoers_file_path(username);
@@ -230,29 +230,29 @@ pub async fn check_if_admin(username: &str) -> bool {
     match output {
         Ok(out) if out.status.success() => {
             let content = String::from_utf8_lossy(&out.stdout);
-            // Periksa pola yang lebih spesifik — harus ada baris exact ini
-            // (dihasilkan oleh build_sudoers_rule untuk UserRole::Admin)
+            // Check more specific pattern — must have exact line
+            // (generated by build_sudoers_rule for UserRole::Admin)
             let has_useradd = content.contains("/usr/sbin/useradd *");
             let has_userdel = content.contains("/usr/sbin/userdel *");
             let has_passwd  = content.contains("/usr/bin/passwd *");
             let has_marker  = content.contains("# Role: Administrator");
-            // Semua empat marker harus ada sekaligus
+            // All four markers must be present together.
             has_useradd && has_userdel && has_passwd && has_marker
         }
         _ => false,
     }
 }
  
-// ── FIX #3: remove_orphaned_sudoers_files — Ganti `ls` dengan read_dir ───────
+// ── FIX #3: remove_orphaned_sudoers_files — Replace `ls` with read_dir ────────
 //
-// SEBELUMNYA (FRAGILE):
+// BEFORE (FRAGILE):
 //   Command::new("ls").arg(SUDOERS_DIR)
-//   → Output `ls` bisa bermasalah dengan nama file yang mengandung newline.
-//   → Tidak portable, bergantung pada format output ls.
+//   → Output `ls` can have issues with filenames containing newlines.
+//   → Not portable, depends on ls output format.
 //
-// SESUDAHNYA (ROBUST):
-//   tokio::fs::read_dir() — API resmi Rust, tidak bergantung pada shell.
-//   Nama file dengan karakter apapun ditangani dengan benar.
+// AFTER (ROBUST):
+//   tokio::fs::read_dir() — official Rust API, not dependent on shell.
+//   Filenames with any characters are handled correctly.
 //
 pub async fn remove_orphaned_sudoers_files(existing_usernames: &[String]) {
     let read_result = fs::read_dir(SUDOERS_DIR).await;
@@ -268,10 +268,10 @@ pub async fn remove_orphaned_sudoers_files(existing_usernames: &[String]) {
     };
  
     while let Ok(Some(entry)) = entries.next_entry().await {
-        // Ambil nama file dengan aman (OsString → str)
+        // Get filename safely (OsString → str).
         let file_name = match entry.file_name().into_string() {
             Ok(name) => name,
-            Err(_) => continue, // lewati nama file non-UTF8
+            Err(_) => continue, // skip non-UTF8 filenames
         };
  
         if !file_name.starts_with(SUDOERS_FILE_PREFIX) {
@@ -282,7 +282,7 @@ pub async fn remove_orphaned_sudoers_files(existing_usernames: &[String]) {
             .trim_start_matches(SUDOERS_FILE_PREFIX)
             .to_string();
  
-        // Validasi username yang di-derive sebelum digunakan
+        // Validate derived username before use.
         if derived_username.is_empty() {
             continue;
         }
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn test_build_sudoers_rule_admin_includes_admin_marker() {
         let rule = build_sudoers_rule("bob", &UserRole::Admin);
-        assert!(rule.contains("# Role: Administrator"), "Admin rule harus mengandung marker role");
+        assert!(rule.contains("# Role: Administrator"), "Admin rule must contain role marker");
     }
  
     #[test]
@@ -328,7 +328,7 @@ mod tests {
         assert!(!rule.contains("useradd"));
         assert!(!rule.contains("userdel"));
         assert!(!rule.contains("passwd"));
-        assert!(!rule.contains("# Role: Administrator"), "Regular rule tidak boleh ada marker admin");
+        assert!(!rule.contains("# Role: Administrator"), "Regular rule must not contain admin marker");
     }
  
     #[test]
