@@ -63,6 +63,64 @@ pub async fn is_virtualised_environment() -> bool {
     Path::new("/proc/vz").exists() || Path::new("/.dockerenv").exists()
 }
 
+/// Diagnoses lxc-net failure by capturing systemd journal and configuration.
+/// Returns a formatted diagnostic message for troubleshooting.
+async fn diagnose_lxcnet_failure() -> String {
+    let mut diagnosis = String::new();
+    
+    // 1. Get lxc-net service status
+    diagnosis.push_str("\n\n=== SERVICE STATUS ===");
+    match Command::new("sudo")
+        .args(&["-n", "systemctl", "is-active", "lxc-net"])
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let status = String::from_utf8_lossy(&out.stdout);
+            diagnosis.push_str(&format!("\nlxc-net status: {}\n", status.trim()));
+        }
+        Err(e) => diagnosis.push_str(&format!("\nFailed to check status: {}\n", e)),
+    }
+    
+    // 2. Get recent journal errors (last 10 lines)
+    diagnosis.push_str("\n=== RECENT ERRORS ===");
+    match Command::new("sudo")
+        .args(&["-n", "journalctl", "-u", "lxc-net", "-n", "10", "--no-pager"])
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let journal = String::from_utf8_lossy(&out.stdout);
+            diagnosis.push_str(&format!("\n{}", journal));
+        }
+        Err(e) => diagnosis.push_str(&format!("\nFailed to read journal: {}\n", e)),
+    }
+    
+    // 3. Check override file exists
+    diagnosis.push_str("\n=== CONFIGURATION FILES ===");
+    let override_file = "/etc/systemd/system/lxc-net.service.d/override.conf";
+    if Path::new(override_file).exists() {
+        diagnosis.push_str("\n[OK] systemd override file exists\n");
+        if let Ok(content) = fs::read_to_string(override_file).await {
+            diagnosis.push_str(&format!("Content:\n{}", content));
+        }
+    } else {
+        diagnosis.push_str("\n[MISSING] systemd override file not found\n");
+    }
+    
+    // 4. Check lxc-net config
+    if let Ok(content) = fs::read_to_string("/etc/default/lxc-net").await {
+        diagnosis.push_str("\n/etc/default/lxc-net (relevant lines):\n");
+        for line in content.lines() {
+            if line.contains("USE_LXC_BRIDGE") || line.contains("LXC_BRIDGE") {
+                diagnosis.push_str(&format!("  {}\n", line));
+            }
+        }
+    }
+    
+    diagnosis
+}
+
 /// Applies the systemd override that allows `lxc-net` to start inside a VM.
 ///
 /// This implements the community-verified procedure for OrbStack (macOS) users
@@ -72,12 +130,16 @@ pub async fn is_virtualised_environment() -> bool {
 ///             clears the ConditionVirtualization restriction.
 ///   Step 2 – Ensure USE_LXC_BRIDGE="true" is set in /etc/default/lxc-net.
 ///   Step 3 – Reload the systemd daemon.
-///   Step 4 – Restart lxc-net.
+///   Step 4 – Restart lxc-net with retry logic.
+///   Step 5 – Poll for lxcbr0 device with 30-second timeout.
+///
+/// Returns `Ok(true)` if lxcbr0 is UP, `Ok(false)` if override applied but bridge didn't appear,
+/// or `Err(msg)` if critical failures occur.
 ///
 /// Note: `chattr +i` on /etc/resolv.conf may fail on VirtIO-FS (OrbStack's
 /// filesystem layer).  This is non-fatal — DNS still works, the file is just
 /// not locked against overwrites.
-async fn apply_orbstack_lxcnet_override(audit: bool) {
+async fn apply_orbstack_lxcnet_override(audit: bool) -> Result<bool, String> {
     println!(
         "{}[ORBSTACK]{} Detected virtualised environment. Applying lxc-net compatibility override…",
         YELLOW, RESET
@@ -99,10 +161,10 @@ async fn apply_orbstack_lxcnet_override(audit: bool) {
             println!("  {}[OK]{} Created systemd override directory.", GREEN, RESET);
         }
         _ => {
-            eprintln!(
-                "  {}[WARN]{} Could not create {}. lxc-net override may not apply.",
-                YELLOW, RESET, override_dir
-            );
+            return Err(format!(
+                "Failed to create systemd override directory: {}",
+                override_dir
+            ));
         }
     }
 
@@ -129,10 +191,10 @@ async fn apply_orbstack_lxcnet_override(audit: bool) {
             );
         }
         _ => {
-            eprintln!(
-                "  {}[WARN]{} Failed to write override file. lxc-net may not start automatically.",
-                YELLOW, RESET
-            );
+            return Err(format!(
+                "Failed to write systemd override to: {}",
+                override_file
+            ));
         }
     }
 
@@ -145,17 +207,27 @@ async fn apply_orbstack_lxcnet_override(audit: bool) {
         bridge_config, bridge_config, bridge_config
     );
 
-    let _ = Command::new("sudo")
+    let bridge_status = Command::new("sudo")
         .args(&["-n", "bash", "-c", &set_bridge_cmd])
         .stdout(if audit { Stdio::inherit() } else { Stdio::null() })
         .stderr(if audit { Stdio::inherit() } else { Stdio::null() })
         .status()
         .await;
-
-    println!(
-        "  {}[OK]{} Configured USE_LXC_BRIDGE=true in {}.",
-        GREEN, RESET, bridge_config
-    );
+    
+    match bridge_status {
+        Ok(s) if s.success() => {
+            println!(
+                "  {}[OK]{} Configured USE_LXC_BRIDGE=true in {}.",
+                GREEN, RESET, bridge_config
+            );
+        }
+        _ => {
+            return Err(format!(
+                "Failed to configure USE_LXC_BRIDGE in: {}",
+                bridge_config
+            ));
+        }
+    }
 
     // ── Step 3: Reload systemd daemon ────────────────────────────────────────
     let daemon_reload = Command::new("sudo")
@@ -170,64 +242,106 @@ async fn apply_orbstack_lxcnet_override(audit: bool) {
             println!("  {}[OK]{} systemd daemon reloaded.", GREEN, RESET);
         }
         _ => {
-            eprintln!("  {}[WARN]{} systemctl daemon-reload failed.", YELLOW, RESET);
+            eprintln!("  {}[WARN]{} systemctl daemon-reload failed — continuing anyway.", YELLOW, RESET);
         }
     }
+    
+    // Give systemd time to process the reload
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    // ── Step 4: Restart lxc-net ──────────────────────────────────────────────
-    let restart_status = Command::new("sudo")
-        .args(&["-n", "systemctl", "restart", "lxc-net"])
-        .stdout(if audit { Stdio::inherit() } else { Stdio::null() })
-        .stderr(if audit { Stdio::inherit() } else { Stdio::null() })
-        .status()
-        .await;
-
-    match restart_status {
-        Ok(s) if s.success() => {
+    // ── Step 4: Restart lxc-net with retry logic ──────────────────────────────
+    let max_retries = 3;
+    let mut last_error = String::new();
+    
+    for attempt in 1..=max_retries {
+        if attempt > 1 {
+            let backoff_secs = 2_u64.pow((attempt - 1) as u32);
             println!(
-                "  {}[OK]{} lxc-net restarted successfully.",
-                GREEN, RESET
+                "  {}[RETRY {}/{}]{} Waiting {} seconds before retry...",
+                YELLOW, attempt, max_retries, RESET, backoff_secs
             );
+            tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
         }
-        _ => {
-            eprintln!(
-                "  {}[ERROR]{} Failed to restart lxc-net even after override. \
-                Check 'sudo journalctl -u lxc-net' for details.",
-                RED, RESET
-            );
-        }
-    }
-
-    // ── Verification ─────────────────────────────────────────────────────────
-    // Give lxcbr0 a moment to come up before the caller checks.
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-    if Path::new("/sys/class/net/lxcbr0").exists() {
-        println!(
-            "  {}[SUCCESS]{} lxcbr0 is UP. DHCP and bridge are operational.",
-            GREEN, RESET
-        );
-        // Verify IP is 10.0.3.1/24 as expected by lxc-net defaults.
-        let ip_check = Command::new("ip")
-            .args(&["addr", "show", "lxcbr0"])
-            .output()
+        
+        println!("  {}[ATTEMPT {}/{}]{} Restarting lxc-net...", YELLOW, attempt, max_retries, RESET);
+        
+        let restart_status = Command::new("sudo")
+            .args(&["-n", "systemctl", "restart", "lxc-net"])
+            .stdout(if audit { Stdio::inherit() } else { Stdio::null() })
+            .stderr(if audit { Stdio::inherit() } else { Stdio::null() })
+            .status()
             .await;
-        if let Ok(out) = ip_check {
-            let ip_output = String::from_utf8_lossy(&out.stdout);
-            if ip_output.contains("10.0.3.1") {
+
+        match restart_status {
+            Ok(s) if s.success() => {
                 println!(
-                    "  {}[OK]{} lxcbr0 has IP 10.0.3.1/24 — DHCP gateway is reachable.",
-                    GREEN, RESET
+                    "  {}[OK]{} lxc-net restarted successfully on attempt {}/{}.",
+                    GREEN, RESET, attempt, max_retries
                 );
+                last_error.clear();
+                break;
+            }
+            Ok(s) => {
+                last_error = format!("Exit code: {}", s.code().unwrap_or(-1));
+            }
+            Err(e) => {
+                last_error = format!("IO Error: {}", e);
             }
         }
-    } else {
-        eprintln!(
-            "  {}[WARNING]{} lxcbr0 did not appear after override. \
-            VirtIO-FS chattr limitation is non-fatal — check /etc/resolv.conf manually if DNS fails.",
-            YELLOW, RESET
-        );
     }
+    
+    if !last_error.is_empty() {
+        let diag = diagnose_lxcnet_failure().await;
+        eprintln!(
+            "  {}[ERROR]{} Failed to restart lxc-net after {} attempts. {}
+            
+Diagnostics:{}",
+            RED, RESET, max_retries, last_error, diag
+        );
+        return Err(format!("lxc-net restart failed: {}", last_error));
+    }
+
+    // ── Verification: Poll for lxcbr0 with 30-second timeout ─────────────────
+    println!("  {}[INFO]{} Polling for network bridge (timeout: 30s)...", YELLOW, RESET);
+    
+    for attempt in 1..=30 {
+        if Path::new("/sys/class/net/lxcbr0").exists() {
+            println!(
+                "  {}[SUCCESS]{} lxcbr0 is UP on poll attempt {}. DHCP and bridge are operational.",
+                GREEN, RESET, attempt
+            );
+            
+            // Verify IP is 10.0.3.1/24 as expected by lxc-net defaults.
+            let ip_check = Command::new("ip")
+                .args(&["addr", "show", "lxcbr0"])
+                .output()
+                .await;
+            if let Ok(out) = ip_check {
+                let ip_output = String::from_utf8_lossy(&out.stdout);
+                if ip_output.contains("10.0.3.1") {
+                    println!(
+                        "  {}[OK]{} lxcbr0 has IP 10.0.3.1/24 — DHCP gateway is reachable.",
+                        GREEN, RESET
+                    );
+                }
+            }
+            return Ok(true);
+        }
+        
+        if attempt < 30 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    
+    eprintln!(
+        "  {}[WARNING]{} lxcbr0 did not appear after 30 seconds of polling.",
+        YELLOW, RESET
+    );
+    println!(
+        "  {}[INFO]{} VirtIO-FS chattr limitation is non-fatal — DNS resolution may require manual /etc/resolv.conf check.",
+        YELLOW, RESET
+    );
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +354,10 @@ async fn apply_orbstack_lxcnet_override(audit: bool) {
 /// `ConditionVirtualization` override is applied automatically before
 /// attempting to start `lxc-net`.  This makes MELISA fully operational on
 /// macOS + OrbStack without any manual steps.
-pub async fn ensure_host_network_ready(audit: bool) {
+///
+/// Returns `Ok(true)` if bridge is operational, `Ok(false)` if override applied
+/// but bridge didn't appear (non-fatal), or `Err(msg)` on critical failures.
+pub async fn ensure_host_network_ready(audit: bool) -> Result<bool, String> {
     println!(
         "{}[INFO]{} Re-initializing host network infrastructure…",
         BOLD, RESET
@@ -248,24 +365,66 @@ pub async fn ensure_host_network_ready(audit: bool) {
 
     // ── OrbStack / VM compatibility ──────────────────────────────────────────
     if is_virtualised_environment().await {
-        apply_orbstack_lxcnet_override(audit).await;
-        println!(
-            "{}[INFO]{} Virtualisation detected (OrbStack/VM). Applying lxc-net override…",
-            YELLOW, RESET
-        );
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        match apply_orbstack_lxcnet_override(audit).await {
+            Ok(bridge_ok) => {
+                println!(
+                    "{}[INFO]{} Virtualisation detected (OrbStack/VM). Override applied.",
+                    YELLOW, RESET
+                );
+                if !bridge_ok {
+                    println!(
+                        "{}[WARNING]{} Bridge setup completed but device not yet visible. Continuing anyway.",
+                        YELLOW, RESET
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("{}[ERROR]{} Failed to apply OrbStack override: {}", RED, RESET, e);
+                return Err(e);
+            }
+        }
     } else {
         // Standard bare-metal: just start lxc-net directly.
+        println!("{}[INFO]{} Bare-metal environment detected. Starting lxc-net...", YELLOW, RESET);
         let lxc_net_args: &[&str] = &["-n", "systemctl", "start", "lxc-net"];
-        if audit {
-            let _ = Command::new("sudo")
+        let status = if audit {
+            Command::new("sudo")
                 .args(lxc_net_args)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .status()
-                .await;
+                .await
         } else {
-            let _ = Command::new("sudo").args(lxc_net_args).status().await;
+            Command::new("sudo").args(lxc_net_args).status().await
+        };
+        
+        match status {
+            Ok(s) if s.success() => {
+                println!("{}[OK]{} lxc-net started successfully.", GREEN, RESET);
+            }
+            Ok(s) => {
+                return Err(format!("lxc-net start failed with exit code: {}", s.code().unwrap_or(-1)));
+            }
+            Err(e) => {
+                return Err(format!("Failed to start lxc-net: {}", e));
+            }
+        }
+        
+        // Poll for bridge on bare-metal too
+        let mut bridge_found = false;
+        for attempt in 1..=10 {
+            if Path::new("/sys/class/net/lxcbr0").exists() {
+                bridge_found = true;
+                println!("{}[OK]{} lxcbr0 is UP on bare-metal.", GREEN, RESET);
+                break;
+            }
+            if attempt < 10 {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        }
+        
+        if !bridge_found {
+            return Err("lxcbr0 bridge did not appear after 10 seconds".to_string());
         }
     }
 
@@ -273,6 +432,8 @@ pub async fn ensure_host_network_ready(audit: bool) {
     let host_distro = detect_host_distro().await;
     let distro_config = get_distro_config(&host_distro);
     configure_firewall_for_lxc(&distro_config.firewall_tool).await;
+    
+    Ok(true)
 }
 
 /// Injects the minimum LXC network stanza (veth/lxcbr0 + random MAC) into
@@ -643,6 +804,11 @@ async fn ensure_iptables_rule(check_args: &[&str], add_args: &[&str]) {
     }
 }
  
+/// Configures the host firewall to allow LXC container traffic.
+///
+/// Supports three firewall backends: firewalld, ufw, and iptables.
+/// For each backend, configures rules to allow traffic to/from the lxcbr0 bridge
+/// and enables IP forwarding for container-to-internet connectivity.
 pub async fn configure_firewall_for_lxc(firewall: &FirewallKind) {
     match firewall {
         FirewallKind::Firewalld => {

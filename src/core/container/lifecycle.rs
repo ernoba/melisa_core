@@ -58,12 +58,43 @@ async fn verify_host_runtime(audit: bool) -> bool {
     if Path::new("/sys/class/net/lxcbr0").exists() {
         return true;
     }
+    
     println!(
         "{}[WARNING]{} Network bridge 'lxcbr0' not found. Initiating host auto-repair...",
         YELLOW, RESET
     );
-    ensure_host_network_ready(audit).await;
-    Path::new("/sys/class/net/lxcbr0").exists()
+    
+    // FIX: Now handles Result<bool> from ensure_host_network_ready()
+    match ensure_host_network_ready(audit).await {
+        Ok(bridge_operational) => {
+            if bridge_operational {
+                println!("{}[SUCCESS]{} Bridge is operational after repair.", GREEN, RESET);
+                return true;
+            } else {
+                println!(
+                    "{}[WARNING]{} Bridge repair completed but device not yet visible.",
+                    YELLOW, RESET
+                );
+                // Give it another moment
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                return Path::new("/sys/class/net/lxcbr0").exists();
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "{}[ERROR]{} Host network auto-repair failed: {}",
+                RED, RESET, e
+            );
+            eprintln!(
+                "{}[TIP]{} Run 'melisa --setup' to manually reinitialize host infrastructure,",
+                YELLOW, RESET
+            );
+            eprintln!(
+                "      or check your network configuration and try again."
+            );
+            return false;
+        }
+    }
 }
 
 /// Polls until the container acquires an IP address via DHCP (or times out).
